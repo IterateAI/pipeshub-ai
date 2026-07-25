@@ -11,8 +11,8 @@ from app.modules.agents.qna.chat_state import ChatState
 
 def _format_user_context(state: ChatState) -> str:
     """Format user information for planner"""
-    user_info = state.get("user_info", {})
-    org_info = state.get("org_info", {})
+    user_info = state.get("user_info") or {}
+    org_info = state.get("org_info") or {}
 
     user_email = state.get("user_email") or user_info.get("userEmail") or user_info.get("email") or ""
     user_name = (

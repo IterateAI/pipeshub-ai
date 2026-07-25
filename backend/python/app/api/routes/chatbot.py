@@ -1,7 +1,9 @@
 import asyncio
 from collections.abc import AsyncGenerator
 import base64
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from app.modules.parsers.pdf.pdf_rasterizer import render_all_pages_as_pil_from_bytes_sync
 from app.modules.parsers.pdf.pdfplumber_opencv_processor import PDFPlumberOpenCVProcessor
+from app.agents.agent_loop.protocol import AGUIEventType, frame, resolve_protocol
+from app.agents.chat_modes import resolve_chat_mode_policy, run_chat_stream
 from app.api.middlewares.auth import require_scopes
 from app.config.configuration_service import ConfigurationService
 from app.config.constants.service import OAuthScopes, config_node_constants
@@ -93,6 +97,9 @@ class ChatQuery(BaseModel):
     currentTime: str | None = None  # ISO 8601 datetime string from the client
     conversationId: str | None = None  # Passed by Node.js layer for background task tracking
     attachments: list[dict[str, Any]] = []
+    # SSE wire protocol negotiation ("legacy" | "agui") -- see
+    # `app.agents.agent_loop.protocol.resolve_protocol`.
+    protocol: str | None = None
 
 
 class AttachmentUploadItem(BaseModel):
@@ -1604,6 +1611,92 @@ async def delete_chat_attachment(
     )
 
 
+def _use_agent_loop_for_chat() -> bool:
+    """Kill-switch for the agent-loop-backed `/chat/stream` pipeline
+    (`chat_modes.run_chat_stream`), mirroring `agent.py`'s pre-migration
+    `PIPESHUB_USE_AGENT_LOOP` rollout pattern. Default `true`; the old
+    direct-LLM pipeline (`_generate_internal_search_stream()`/
+    `_generate_web_search_stream()`) stays in this file for one release as
+    a rollback path, then both it and this flag are deleted."""
+    return os.getenv("PIPESHUB_CHAT_USE_AGENT_LOOP", "true").strip().lower() == "true"
+
+
+async def _generate_chat_stream_via_agent_loop(
+    request: Request,
+    query_info: "ChatQuery",
+    retrieval_service: RetrievalService,
+    graph_provider: IGraphDBProvider,
+    config_service: ConfigurationService,
+) -> AsyncGenerator[str, None]:
+    """Adapts a validated `ChatQuery` + the authenticated request into the
+    plain-dict `query_info`/`user_info` contract `chat_modes.run_chat_stream()`
+    expects (see that module's docstring for why it never sees `ChatQuery`
+    or `Request` directly -- avoids both a circular import and coupling the
+    agents layer to FastAPI), then streams straight from it.
+
+    Tool calling is left on for every provider, including Ollama: without it,
+    `internal_search` can never reach the `fetch_full_record` tool the agent
+    loop registers mid-run, so full-record retrieval would silently degrade
+    to snippet-only answers. Models that genuinely can't bind tools surface
+    that as a normal LLM-call error from within the agent loop, same as any
+    other provider misconfiguration."""
+    container = request.app.container
+    logger_ = container.logger()
+    user = getattr(request.state, "user", {}) or {}
+    org_id = user.get("orgId")
+    user_id = user.get("userId")
+    protocol = resolve_protocol(query_info.protocol, request)
+
+    try:
+        llm, model_config, ai_models_config = await get_llm_for_chat(
+            config_service, query_info.modelKey, query_info.modelName, query_info.chatMode,
+        )
+        if llm is None:
+            raise ValueError("Failed to initialize LLM service. LLM configuration is missing.")
+    except Exception as exc:
+        logger_.error(f"Error initializing LLM for chat: {exc}", exc_info=True)
+        if protocol == "agui":
+            evt = frame(AGUIEventType.RUN_ERROR, message=str(exc), code="llm_initialization_failed")
+            yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'])}\n\n"
+        else:
+            yield create_sse_event("error", {"error": str(exc)})
+        return
+
+    policy = resolve_chat_mode_policy(query_info.chatMode)
+    is_multimodal_llm = bool(model_config.get("isMultimodal"))
+    context_length = model_config.get("contextLength") or DEFAULT_CONTEXT_LENGTH
+
+    query_dict = {
+        "query": query_info.query,
+        "limit": query_info.limit,
+        "previous_conversations": query_info.previousConversations,
+        "filters": query_info.filters,
+        "retrievalMode": query_info.retrievalMode,
+        "quickMode": query_info.quickMode,
+        "chatMode": query_info.chatMode,
+        "timezone": query_info.timezone,
+        "currentTime": query_info.currentTime,
+        "conversationId": query_info.conversationId,
+        "attachments": query_info.attachments,
+    }
+    user_info = {
+        "userId": user_id,
+        "orgId": org_id,
+        "userEmail": user.get("email") or "",
+        "sendUserInfo": request.query_params.get("sendUserInfo", True),
+    }
+
+    async for event in run_chat_stream(
+        query_dict, user_info, llm, policy, logger_,
+        retrieval_service=retrieval_service, graph_provider=graph_provider,
+        reranker_service=None, config_service=config_service,
+        model_name=query_info.modelName, model_key=query_info.modelKey,
+        is_multimodal_llm=is_multimodal_llm, context_length=context_length,
+        ai_models_config=ai_models_config, protocol=protocol,
+    ):
+        yield event
+
+
 @router.post("/chat/stream", dependencies=[Depends(require_scopes(OAuthScopes.CONVERSATION_CHAT))])
 @inject
 async def askAIStream(
@@ -1612,7 +1705,14 @@ async def askAIStream(
     graph_provider: IGraphDBProvider = Depends(get_graph_provider),
     config_service: ConfigurationService = Depends(get_config_service),
 ) -> StreamingResponse:
-    """Perform semantic search across documents with streaming events and tool support"""
+    """Perform semantic search across documents with streaming events and tool support.
+
+    Every mode (`internal_search`, `web_search`, `agent`) routes through the
+    agent loop (`app.agents.chat_modes.run_chat_stream`) by default -- see
+    that package for the mode -> tool/prefetch behavior. `PIPESHUB_CHAT_USE_
+    AGENT_LOOP=false` falls back to the pre-migration direct-LLM pipeline
+    for one release as a rollback path.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -1636,7 +1736,15 @@ async def askAIStream(
         "search_type": _search_type,
     })
 
-    if query_info.chatMode == "web_search":
+    if _use_agent_loop_for_chat():
+        stream = _generate_chat_stream_via_agent_loop(
+            request=request,
+            query_info=query_info,
+            retrieval_service=retrieval_service,
+            graph_provider=graph_provider,
+            config_service=config_service,
+        )
+    elif query_info.chatMode == "web_search":
         stream = _generate_web_search_stream(
             request=request,
             query_info=query_info,

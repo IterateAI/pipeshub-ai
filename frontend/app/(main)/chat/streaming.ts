@@ -927,7 +927,7 @@ export async function streamRegenerateForSlot(
     };
 
     if (threadAgentId) {
-      const { chatMode } = buildStreamRequestModeFields(store.settings);
+      const { chatMode } = buildStreamRequestModeFields(store.settings, true);
       const agentApiChatMode = streamChatModeToAgentApiChatMode(chatMode);
       // Read agent tools from the store at regen time so the correct tool set
       // is used even when the user changed the selection between turns.
@@ -955,7 +955,7 @@ export async function streamRegenerateForSlot(
         }
       );
     } else {
-      const { chatMode } = buildStreamRequestModeFields(store.settings);
+      const { chatMode } = buildStreamRequestModeFields(store.settings, false);
       // Universal agent mode: read current tool selection at regen time
       const isUniversalAgent = store.settings.queryMode === 'agent';
       const universalToolsSel = useChatStore.getState().universalAgentStreamTools;

@@ -144,11 +144,6 @@ class TestRetrievalInit:
         r = Retrieval(state=state)
         assert r.state is state
 
-    def test_writer_stored(self):
-        writer = MagicMock()
-        r = Retrieval(state=_make_state(), writer=writer)
-        assert r.writer is writer
-
     def test_no_state(self):
         r = Retrieval()
         assert r.state is None

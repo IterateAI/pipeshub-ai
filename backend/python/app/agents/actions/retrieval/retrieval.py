@@ -11,7 +11,6 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from langgraph.types import StreamWriter
 from pydantic import BaseModel, Field
 
 from app.agent_loop_lib.tools.base import ParameterType, Tag, ToolParameter
@@ -155,9 +154,8 @@ class SearchInternalKnowledgeInput(BaseModel):
 class Retrieval:
     """Internal knowledge retrieval tool exposed to agents"""
 
-    def __init__(self, state: ChatState | None = None, writer: StreamWriter | None = None, **kwargs) -> None:
+    def __init__(self, state: ChatState | None = None, **kwargs) -> None:
         self.state: ChatState | None = state or kwargs.get('state')
-        self.writer = writer
         logger.info("🚀 Initializing Internal Knowledge Retrieval tool")
 
     @tool(

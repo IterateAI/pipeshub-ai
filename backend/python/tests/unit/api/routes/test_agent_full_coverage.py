@@ -436,12 +436,15 @@ class TestResolveDefaultWebSearchConfig:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_no_providers_returns_none(self):
+    async def test_no_providers_falls_back_to_duckduckgo(self):
+        """A brand-new org with an empty `providers` list must still default
+        to DuckDuckGo, matching the Node.js layer's implicit-default
+        behavior -- not silently disable web_search."""
         from app.api.routes.agent import _resolve_default_web_search_config
         cs = AsyncMock()
         cs.get_config = AsyncMock(return_value={"providers": []})
         result = await _resolve_default_web_search_config(cs, MagicMock())
-        assert result is None
+        assert result == {"provider": "duckduckgo", "configuration": {}}
 
     @pytest.mark.asyncio
     async def test_no_default_falls_back_duckduckgo(self):
@@ -1228,95 +1231,6 @@ class TestBuildPriorRoutingMessages:
 
 
 # ============================================================================
-# _auto_select_graph — lines 355, 485, 493
-# ============================================================================
-
-
-class TestAutoSelectGraph:
-    @pytest.mark.asyncio
-    async def test_empty_query_returns_modern(self):
-        from app.api.routes.agent import _auto_select_graph, modern_agent_graph
-        result = await _auto_select_graph({"query": ""}, MagicMock(), MagicMock())
-        assert result is modern_agent_graph
-
-    @pytest.mark.asyncio
-    async def test_attachment_blocks_in_routing(self):
-        """Lines 485-493 — attachment blocks inject multimodal content."""
-        from app.api.routes.agent import _auto_select_graph, modern_agent_graph
-        mock_llm = MagicMock()
-        structured = AsyncMock()
-        mock_llm.with_structured_output = MagicMock(return_value=structured)
-        mock_decision = MagicMock()
-        mock_decision.route = "react"
-        mock_decision.reasoning = "test"
-        structured.ainvoke = AsyncMock(return_value=mock_decision)
-        blob_store = AsyncMock()
-
-        with patch("app.modules.agents.qna.router.build_capability_context",
-                   return_value=("cap_block", 0, [], [])), \
-             patch("app.modules.agents.qna.router.build_prior_routing_messages",
-                   new_callable=AsyncMock, return_value=[]), \
-             patch("app.modules.agents.qna.router.resolve_attachments",
-                   new_callable=AsyncMock, return_value=[{"type": "image_url", "image_url": {"url": "base64..."}}]):
-            result = await _auto_select_graph(
-                {"query": "analyze this", "attachments": [{"id": "a1"}]},
-                MagicMock(), mock_llm,
-                is_multimodal_llm=True,
-                org_id="o1",
-            )
-        assert result is modern_agent_graph
-
-
-# ============================================================================
-# _select_agent_graph_for_query — multiple modes
-# ============================================================================
-
-
-class TestSelectAgentGraphForQuery:
-    @pytest.mark.asyncio
-    async def test_deep_mode(self):
-        from app.api.routes.agent import _select_agent_graph_for_query, deep_agent_graph
-        result = await _select_agent_graph_for_query(
-            {"chatMode": "deep"}, MagicMock(), MagicMock()
-        )
-        assert result is deep_agent_graph
-
-    @pytest.mark.asyncio
-    async def test_verification_mode(self):
-        from app.api.routes.agent import _select_agent_graph_for_query, modern_agent_graph
-        result = await _select_agent_graph_for_query(
-            {"chatMode": "verification"}, MagicMock(), MagicMock()
-        )
-        assert result is modern_agent_graph
-
-    @pytest.mark.asyncio
-    async def test_plan_execute_mode(self):
-        from app.api.routes.agent import _select_agent_graph_for_query, modern_agent_graph
-        result = await _select_agent_graph_for_query(
-            {"chatMode": "planExecute"}, MagicMock(), MagicMock()
-        )
-        assert result is modern_agent_graph
-
-    @pytest.mark.asyncio
-    async def test_quick_mode(self):
-        from app.api.routes.agent import _select_agent_graph_for_query, agent_graph
-        result = await _select_agent_graph_for_query(
-            {"chatMode": "quick"}, MagicMock(), MagicMock()
-        )
-        assert result is agent_graph
-
-    @pytest.mark.asyncio
-    async def test_auto_mode_delegates(self):
-        from app.api.routes.agent import _select_agent_graph_for_query, modern_agent_graph
-        with patch("app.api.routes.agent._auto_select_graph",
-                   new_callable=AsyncMock, return_value=modern_agent_graph):
-            result = await _select_agent_graph_for_query(
-                {"chatMode": "auto"}, MagicMock(), MagicMock()
-            )
-        assert result is modern_agent_graph
-
-
-# ============================================================================
 # share_agent/unshare_agent — lines 3133, 3140, 3148-3150, 3169, 3172, 3176, 3182-3186
 # ============================================================================
 
@@ -1619,48 +1533,3 @@ class TestCreateAgentInstanceFields:
                 break
         if toolset_nodes:
             assert any(n.get("instanceId") == "inst1" for n in toolset_nodes)
-
-
-class TestStreamResponse:
-    @pytest.mark.asyncio
-    async def test_stream_yields_events(self):
-        from app.api.routes.agent import stream_response
-
-        mock_llm = MagicMock()
-        log = logging.getLogger("test")
-        gp = AsyncMock()
-        rr = MagicMock()
-        rs = MagicMock()
-        cs = MagicMock()
-
-        async def mock_astream(*args, **kwargs):
-            yield {"event": "token", "data": {"text": "hello"}}
-
-        with patch("app.api.routes.agent._select_agent_graph_for_query", new_callable=AsyncMock) as mock_select:
-            mock_graph = MagicMock()
-            mock_graph.astream = mock_astream
-            mock_select.return_value = mock_graph
-            with patch("app.api.routes.agent.build_initial_state", return_value={}):
-                chunks = []
-                async for chunk in stream_response(
-                    {"chatMode": "quick"}, {"userId": "u1", "orgId": "o1"}, mock_llm, log, rs, gp, rr, cs
-                ):
-                    chunks.append(chunk)
-                assert len(chunks) >= 1
-                assert "event: token" in chunks[0]
-
-    @pytest.mark.asyncio
-    async def test_stream_error(self):
-        from app.api.routes.agent import stream_response
-
-        mock_llm = MagicMock()
-        log = logging.getLogger("test")
-
-        with patch("app.api.routes.agent._select_agent_graph_for_query", new_callable=AsyncMock, side_effect=Exception("fail")):
-            chunks = []
-            async for chunk in stream_response(
-                {"chatMode": "quick"}, {"userId": "u1", "orgId": "o1"}, mock_llm, log,
-                MagicMock(), AsyncMock(), MagicMock(), MagicMock()
-            ):
-                chunks.append(chunk)
-            assert any("error" in c for c in chunks)

@@ -2,12 +2,13 @@
 execution tiers (`quick` / `react` / `deep`).
 
 Extracted from `app/api/routes/agent.py::_auto_select_graph` (Phase 7 of the
-agent-loop migration) so the new agent-loop auto-router
+agent-loop migration) so the agent-loop auto-router
 (`app/agents/agent_loop/router.py`) and the legacy LangGraph route selector
-share exactly one classification prompt/heuristic instead of two forks that
-would silently drift apart. This module stops at the tier decision itself —
-mapping a tier to a `CompiledStateGraph` (legacy) or a `LoopStrategy`
-(agent-loop) is each caller's own concern.
+(both `_auto_select_graph` and the rest of LangGraph have since been
+deleted) shared exactly one classification prompt/heuristic instead of two
+forks that would silently drift apart. This module stops at the tier
+decision itself — mapping a tier to a `LoopStrategy` is the caller's own
+concern.
 """
 
 from __future__ import annotations

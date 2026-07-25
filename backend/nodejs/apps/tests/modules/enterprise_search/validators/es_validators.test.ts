@@ -112,6 +112,15 @@ describe('enterprise_search/validators/es_validators', () => {
       expect(result.success).to.be.true
     })
 
+    it('should accept the universal agent chatMode ("agent", no strategy suffix)', () => {
+      // Sent by the toolbar's "Agent" query mode when no specific custom
+      // agent is selected -- `parseChatMode` (es_controller.ts) routes this
+      // to `/api/v1/agent/agentIdPlaceholder/chat/stream`.
+      const data = { body: { query: 'hello', chatMode: 'agent' } }
+      const result = enterpriseSearchCreateSchema.safeParse(data)
+      expect(result.success).to.be.true
+    })
+
     it('should reject attachment entries missing recordId', () => {
       const data = {
         body: {
@@ -429,6 +438,15 @@ describe('enterprise_search/validators/es_validators', () => {
           chatMode: 'internal_search',
           attachments: [{ recordId: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
         },
+      }
+      const result = addMessageParamsSchema.safeParse(data)
+      expect(result.success).to.be.true
+    })
+
+    it('should accept the universal agent chatMode ("agent", no strategy suffix)', () => {
+      const data = {
+        params: { conversationId: '507f1f77bcf86cd799439011' },
+        body: { query: 'follow up', chatMode: 'agent' },
       }
       const result = addMessageParamsSchema.safeParse(data)
       expect(result.success).to.be.true

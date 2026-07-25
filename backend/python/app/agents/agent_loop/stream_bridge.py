@@ -164,10 +164,8 @@ def _merge_coalesced(pending: dict[str, Any], incoming: dict[str, Any]) -> dict[
 
 class QueueEventSink:
     """`EventSink` (`app.modules.agents.event_sink`) backed by a BOUNDED
-    `asyncio.Queue` — the agent-loop-path counterpart to `LangGraphEventSink`
-    (which writes straight through a `StreamWriter` because LangGraph's own
-    `astream(..., stream_mode="custom")` already provides the queueing/
-    backpressure `Agent.run()` doesn't).
+    `asyncio.Queue` — `Agent.run()` has no built-in queueing/backpressure of
+    its own, so this sink provides it for every consumer of the stream.
 
     Bounding the queue alone would just turn "unbounded memory growth" into
     "the agent run stalls on `write()` the moment the SSE consumer falls

@@ -3,10 +3,12 @@ layer's tool execution and prompt building — the Phase 3 replacement for
 threading a full `ChatState` through `PipesHubToolAdapter`/`PipesHubToolLoader`.
 
 `ChatState` (`app.modules.agents.qna.chat_state`) still exists and is still
-built by `build_initial_state()` for the legacy LangGraph path and for
-Phase 6's `RespondPipeline`. `AgentContext` doesn't replace it — it's a
-narrower, validated view constructed from the same route-handler inputs,
-carrying only what tool execution and prompt assembly need.
+built by `build_initial_state()` — now the shared state constructor for
+every agent-loop entry point (`stream_bridge.run_agent_loop_stream()`,
+`chat_modes.bridge.run_chat_stream()`) after LangGraph's removal.
+`AgentContext` doesn't replace it — it's a narrower, validated view
+constructed from the same route-handler inputs, carrying only what tool
+execution and prompt assembly need.
 
 `ToolInstanceCreator` (`app.agents.agent_loop.instance_creator`) accepts an
 `AgentContext` and reads typed fields (``config_service``, ``logger``,
@@ -246,11 +248,11 @@ class AgentContext(BaseModel):
         """Builds an `AgentContext` from an already-built `ChatState` dict
         (Phase 8, `stream_bridge.py`) rather than re-deriving every field a
         second time. `build_initial_state()` (`chat_state.py`) already does
-        100% of the derivation work the legacy LangGraph path needs — apps/kb
-        extraction from `knowledge`, `tool_to_toolset_map`, `has_sql_knowledge`,
-        etc. — and the agent-loop path needs exactly the same derived values,
-        so this simply lifts the identity/service/config fields out for typed
-        access while passing the SAME dict through as `tool_state`. That
+        100% of the derivation work every agent-loop entry point needs —
+        apps/kb extraction from `knowledge`, `tool_to_toolset_map`,
+        `has_sql_knowledge`, etc. — so this simply lifts the identity/
+        service/config fields out for typed access while passing the
+        SAME dict through as `tool_state`. That
         dict-identity is deliberate: `model_post_init`'s `setdefault()` calls
         below are then no-ops (every key already exists with its real,
         already-derived value), and every PipesHub tool mutates the one dict

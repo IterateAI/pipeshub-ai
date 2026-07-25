@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from app.agent_loop_lib.tools.base import ParameterType, Tool, ToolOutput, ToolParameter
 from app.modules.agents.context.tool_descriptions import _extract_parameters_from_schema
 from app.modules.agents.context.tool_result_extractor import ToolResultExtractor
-from app.modules.agents.qna.nodes import clean_tool_result
+from app.modules.agents.qna.helpers import clean_tool_result
 
 
 if TYPE_CHECKING:

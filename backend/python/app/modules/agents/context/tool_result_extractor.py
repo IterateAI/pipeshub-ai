@@ -1,7 +1,7 @@
 """`ToolResultExtractor`: reliable extraction of data from tool results,
 extracted from `modules/agents/qna/nodes.py` (Phase 0 of the agent-loop
-migration). Heavily used both by the legacy LangGraph node functions and
-by `modules/agents/context/tool_results_context.py`.
+migration, before that module and the rest of LangGraph were deleted).
+Used by `modules/agents/context/tool_results_context.py`.
 """
 
 

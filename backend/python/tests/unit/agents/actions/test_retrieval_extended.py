@@ -533,11 +533,6 @@ class TestRetrievalInitExtended:
         r = Retrieval(**{"state": state})
         assert r.state is state
 
-    def test_writer_default_none(self):
-        """Writer defaults to None."""
-        r = Retrieval(state=_make_state())
-        assert r.writer is None
-
 
 # ============================================================================
 # search_internal_knowledge: empty agent filters

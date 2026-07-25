@@ -194,6 +194,33 @@ def _grant(spec: "AgentSpec | None", *, require_internal_search_reference: bool)
     spec.tool_names.append(_FETCH_FULL_RECORD_TOOL_NAME)
 
 
+def eagerly_register_fetch_full_record(
+    registry: Any,
+    collector: CitationCollector,
+    context: AgentContext,
+) -> bool:
+    """Register `_FetchFullRecordTool` on *registry* if `collector.virtual_records`
+    is already populated — e.g. after prefetch retrieval fills `tool_state`
+    before the first agent turn.
+
+    Returns ``True`` if the tool was registered (or was already present),
+    ``False`` if the virtual-record map is empty (nothing to register).
+
+    Callers: `chat_modes/bridge.py` after prefetch completes; mirrors what
+    `citation_tracking` (the POST_TOOL_USE hook) does mid-run, ensuring the
+    tool is available from turn 1 when prefetch skips any tool call.
+    """
+    if not collector.virtual_records:
+        return False
+    from app.agent_loop_lib.tools.registry import ToolRegistry
+
+    if not isinstance(registry, ToolRegistry):
+        return False
+    registry.register_tool_if_absent(_FetchFullRecordTool(collector, context))
+    _grant(context.root_agent_spec, require_internal_search_reference=False)
+    return True
+
+
 def citation_tracking(
     context: AgentContext, collector: CitationCollector
 ) -> "Middleware[ToolResultContext]":
@@ -236,4 +263,4 @@ def citation_tracking(
     return _middleware
 
 
-__all__ = ["CitationCollector", "citation_tracking"]
+__all__ = ["CitationCollector", "citation_tracking", "eagerly_register_fetch_full_record"]

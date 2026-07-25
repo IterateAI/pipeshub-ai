@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fastapi import Request
 
 
 class AGUIEventType(str, Enum):
@@ -64,4 +67,18 @@ def frame(event_type: AGUIEventType, **fields: Any) -> dict[str, Any]:
     return {"event": event_type.value, "data": {"type": event_type.value, **fields}}
 
 
-__all__ = ["AGUIEventType", "new_id", "frame"]
+def resolve_protocol(protocol_field: str | None, request: "Request") -> str:
+    """Negotiate the SSE wire protocol shared by every `/chat/stream`-shaped
+    route (`agent.py::chat_stream`, `chatbot.py::askAIStream`) — an explicit
+    body field (how Node.js's hand-built outbound request sets it) takes
+    precedence over a `?protocol=` query param (for direct API callers),
+    defaulting to `"legacy"` for absolutely everything else: the Slack bot,
+    internal/service-account routes, and any existing API client keep
+    working with zero changes. The ONLY recognized non-legacy value is
+    `"agui"` — anything else collapses to legacy rather than erroring, so a
+    typo'd param never breaks a request."""
+    value = protocol_field or request.query_params.get("protocol")
+    return "agui" if value == "agui" else "legacy"
+
+
+__all__ = ["AGUIEventType", "new_id", "frame", "resolve_protocol"]

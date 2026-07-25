@@ -14,7 +14,11 @@ requests.
 
 from app.agents.agent_loop.hooks.artifact_context import artifact_context_reminder
 from app.agents.agent_loop.hooks.ask_user_question import ask_user_question_sse
-from app.agents.agent_loop.hooks.citations import CitationCollector, citation_tracking
+from app.agents.agent_loop.hooks.citations import (
+    CitationCollector,
+    citation_tracking,
+    eagerly_register_fetch_full_record,
+)
 from app.agents.agent_loop.hooks.completion_gate import (
     completion_gate,
     looks_like_file_generation_request,
@@ -39,6 +43,7 @@ __all__ = [
     "citation_tracking",
     "completion_gate",
     "conversation_enrichment",
+    "eagerly_register_fetch_full_record",
     "seed_visible_tools_from_history",
     "internal_search_attempted_tracking",
     "knowledge_first_gate",

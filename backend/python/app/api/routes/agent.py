@@ -12,10 +12,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from langchain_core.language_models.chat_models import BaseChatModel
-from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
+from app.agents.agent_loop.protocol import resolve_protocol
 from app.agents.agent_loop.stream_bridge import run_agent_loop_stream
 from app.agents.registry.toolset_registry import ToolsetRegistry
 from app.api.middlewares.auth import authMiddleware, require_scopes
@@ -25,21 +24,9 @@ from app.config.constants.arangodb import CollectionNames, Connectors
 from app.config.constants.http_status_code import HttpStatusCode
 from app.config.constants.service import OAuthScopes, config_node_constants
 from app.modules.agents.capability_summary import fetch_connector_configs
-from app.modules.agents.deep.graph import deep_agent_graph
-from app.modules.agents.deep.state import build_deep_agent_state
-from app.modules.agents.qna.cache_manager import get_cache_manager
-from app.modules.agents.qna.chat_state import (
-    _extract_kb_app_ids,
-    build_initial_state,
-)
-from app.modules.agents.qna.graph import agent_graph, modern_agent_graph
-from app.modules.agents.qna.memory_optimizer import (
-    auto_optimize_state,
-    check_memory_health,
-)
+from app.modules.agents.qna.chat_state import _extract_kb_app_ids
 from app.modules.agents.qna.router import (
     RouteDecision,  # noqa: F401 - re-exported for backward-compat imports (see below)
-    classify_route,
 )
 from app.modules.agents.qna.router import (
     build_capability_context as _build_agent_capability_context,  # noqa: F401
@@ -47,8 +34,6 @@ from app.modules.agents.qna.router import (
 from app.modules.agents.qna.router import (
     build_prior_routing_messages as _build_prior_routing_messages,  # noqa: F401
 )
-from app.modules.reranker.reranker import RerankerService
-from app.modules.retrieval.retrieval_service import RetrievalService
 from app.modules.transformers.blob_storage import (
     BlobStorage,  # noqa: F401 - re-exported, see above
 )
@@ -58,8 +43,6 @@ from app.telemetry.identity import domain_from_email
 from app.utils.attachment_utils import (
     resolve_attachments,  # noqa: F401 - re-exported, see above
 )
-from app.utils.execute_query import has_sql_connector_configured
-from app.utils.fetch_slack_thread import has_slack_connector_configured
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 # `RouteDecision`/`_build_agent_capability_context`/`_build_prior_routing_messages`/
@@ -74,29 +57,12 @@ from app.utils.time_conversion import get_epoch_timestamp_in_ms
 router = APIRouter()
 
 
-def _use_agent_loop() -> bool:
-    """Phase 8 feature flag: `chat_stream` runs the agent-loop path
-    (`run_agent_loop_stream`) instead of the legacy LangGraph path
-    (`stream_response`) when this is true. An env var rather than an etcd
-    `config_service` key deliberately — this flag exists only for this
-    migration's parallel rollout/rollback, not as a customer-facing setting,
-    so it needs no admin UI or persisted schema; flipping it per-deployment
-    (or per-process, for A/B canary runs) is a restart away either way.
-    """
-    return os.getenv("PIPESHUB_USE_AGENT_LOOP", "true").strip().lower() == "true"
-
-
 def _resolve_protocol(chat_query: "ChatQuery", request: Request) -> str:
-    """Negotiate the SSE wire protocol for `chat_stream` — explicit body
-    field (`ChatQuery.protocol`, how Node.js's hand-built outbound request
-    sets it) takes precedence over a `?protocol=` query param (for direct
-    API callers), defaulting to `"legacy"` for absolutely everything else:
-    the Slack bot, internal/service-account routes, and any existing API
-    client keep working with zero changes. The ONLY recognized non-legacy
-    value is `"agui"` — anything else collapses to legacy rather than
-    erroring, so a typo'd param never breaks a request."""
-    value = chat_query.protocol or request.query_params.get("protocol")
-    return "agui" if value == "agui" else "legacy"
+    """Negotiate the SSE wire protocol for `chat_stream` — see
+    `app.agents.agent_loop.protocol.resolve_protocol` (shared with
+    `chatbot.py::askAIStream` so both `/chat/stream`-shaped routes
+    negotiate identically)."""
+    return resolve_protocol(chat_query.protocol, request)
 
 
 # Opik tracer initialization
@@ -331,83 +297,6 @@ async def _resolve_service_account_caller_identity(
     return enriched_user_info
 
 
-async def _select_agent_graph_for_query(
-    query_info: dict[str, Any],
-    logger: Logger,
-    llm: BaseChatModel,
-    config_service: Any = None,
-    graph_provider: Any = None,
-    is_multimodal_llm: bool = False,
-    org_id: str = "",
-) -> CompiledStateGraph:
-    """
-    Graph selection based on chatMode from the chat input:
-    - quick: legacy agent graph (fast, no tool loops)
-    - planExecute (alias: verification): modern ReAct agent graph (tool
-      calling with reflection) — `verification` is the pre-rename wire
-      value; both map here so old conversations/clients keep working.
-    - deep: deep agent graph (orchestrator + sub-agents)
-    - auto: LLM router decides based on query complexity (default: quick)
-    """
-    chat_mode = (query_info.get("chatMode") or "auto").lower().strip()
-
-    if chat_mode == "deep":
-        logger.info("Agent graph route: deep | chatMode=deep")
-        return deep_agent_graph
-
-    if chat_mode in ("planexecute", "verification"):
-        logger.info("Agent graph route: react | chatMode=%s", chat_mode)
-        return modern_agent_graph
-
-    if chat_mode == "auto":
-        # Auto-detect: use LLM to pick the right graph
-        return await _auto_select_graph(
-            query_info, logger, llm,
-            config_service=config_service,
-            graph_provider=graph_provider,
-            is_multimodal_llm=is_multimodal_llm,
-            org_id=org_id,
-        )
-
-    # Default: "auto" → LLM router decides
-    logger.info("Agent graph route: legacy | chatMode=%s", chat_mode)
-    return agent_graph
-
-
-async def _auto_select_graph(
-    query_info: dict[str, Any],
-    logger: Logger,
-    llm: BaseChatModel,
-    config_service: Any = None,
-    graph_provider: Any = None,
-    is_multimodal_llm: bool = False,
-    org_id: str = "",
-) -> CompiledStateGraph:
-    """
-    Auto-select graph using an LLM call to classify the query into one of
-    three agent types: quick, react, or deep. The classification itself
-    (`classify_route`) is shared with the agent-loop auto-router
-    (`app/agents/agent_loop/router.py`) — this function's only job is
-    mapping that tier to this route's `CompiledStateGraph`.
-    """
-    decision = await classify_route(
-        query_info,
-        logger,
-        llm,
-        config_service=config_service,
-        graph_provider=graph_provider,
-        is_multimodal_llm=is_multimodal_llm,
-        org_id=org_id,
-        opik_tracer=_opik_tracer,
-    )
-    route_map = {
-        "quick": agent_graph,
-        "react": modern_agent_graph,
-        "deep": deep_agent_graph,
-    }
-    return route_map[decision.route]
-
-
 async def _get_user_document(user_id: str, graph_provider: IGraphDBProvider, logger: Logger) -> dict[str, Any]:
     """Get user document with validation"""
     try:
@@ -639,17 +528,19 @@ async def _resolve_default_web_search_config(
         if isinstance(web_search_config, dict)
         else []
     )
-    if not isinstance(providers, list) or not providers:
-        return None
+    if not isinstance(providers, list):
+        providers = []
 
     default_provider = next(
         (p for p in providers if isinstance(p, dict) and p.get("isDefault")),
         None,
     )
 
-    # When providers exist but none carries isDefault=true, the Node.js layer has
-    # set DuckDuckGo as the active default (it clears all isDefault flags rather
-    # than inserting a DuckDuckGo entry into the array).
+    # Whenever no provider carries isDefault=true -- whether the org has never
+    # configured any provider (empty/absent `providers`) or has configured one
+    # without marking it default -- the Node.js layer treats DuckDuckGo as the
+    # active default (it clears all isDefault flags rather than inserting a
+    # DuckDuckGo entry into the array; see `cm_controller.ts::getWebSearchProviders`).
     if not default_provider:
         logger.debug("No explicit default web search provider; falling back to duckduckgo")
         return {"provider": "duckduckgo", "configuration": {}}
@@ -1245,301 +1136,6 @@ def _mark_deprecated_tools(agent: dict[str, Any], logger: Logger) -> None:
     currently a no-op until a replacement registry is wired in.
     """
     return
-
-
-# ============================================================================
-# Chat Endpoints
-# ============================================================================
-
-@router.post("/agent-chat", dependencies=[Depends(require_scopes(OAuthScopes.AGENT_EXECUTE))])
-async def askAI(request: Request, query_info: ChatQuery) -> JSONResponse:
-    """Process chat query using LangGraph agent with optimizations"""
-    try:
-        import time
-        start_time = time.time()
-
-        services = await get_services(request)
-        logger = services["logger"]
-        graph_provider = services["graph_provider"]
-        reranker_service = services["reranker_service"]
-        retrieval_service = services["retrieval_service"]
-        config_service = services["config_service"]
-        user_context = _get_user_context(request)
-
-        record_event("agent_run", {
-            "orgId": user_context.get("orgId"),
-            "userId": user_context.get("userId"),
-            "email": user_context.get("email"),
-            "domain": user_context.get("domain"),
-            "has_tools": bool(query_info.tools),
-        })
-
-        # Check cache first
-        cache = get_cache_manager()
-        cache_context = {
-            "has_internal_data": query_info.filters is not None,
-            "tools": query_info.tools
-        }
-        cached_response = cache.get_llm_response(query_info.query, cache_context)
-        if cached_response:
-            logger.info(f"⚡ Cache hit! Query resolved in {(time.time() - start_time) * 1000:.0f}ms")
-            return JSONResponse(content=cached_response)
-
-        # Get user and org info
-        user_doc = await _get_user_document(user_context["userId"], services["graph_provider"], logger)
-        enriched_user_info = await _enrich_user_info(user_context, user_doc)
-        org_info = await _get_org_info(user_context, services["graph_provider"], logger)
-
-        # Build and execute graph
-        selected_graph = await _select_agent_graph_for_query(
-            query_info.model_dump(), logger, services["llm"],
-            config_service=config_service,
-            graph_provider=graph_provider,
-            org_id=enriched_user_info.get("orgId", ""),
-        )
-
-        has_sql_connector = await has_sql_connector_configured(
-            graph_provider, enriched_user_info["userId"], enriched_user_info["orgId"]
-        )
-        has_slack_connector = await has_slack_connector_configured(
-            graph_provider, enriched_user_info["userId"], enriched_user_info["orgId"]
-        )
-        if selected_graph == deep_agent_graph:
-            initial_state = build_deep_agent_state(
-                query_info.model_dump(),
-                enriched_user_info,
-                services["llm"],
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                org_info,
-                query_info.modelName,
-                query_info.modelKey,
-                has_sql_connector=has_sql_connector,
-                has_slack_connector=has_slack_connector,
-            )
-        else:
-            graph_type = "react" if selected_graph == modern_agent_graph else "legacy"
-            initial_state = build_initial_state(
-                query_info.model_dump(),
-                enriched_user_info,
-                services["llm"],
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                query_info.modelName,
-                query_info.modelKey,
-                org_info,
-                graph_type,
-                has_sql_connector=has_sql_connector,
-                has_slack_connector=has_slack_connector,
-            )
-
-        graph_to_use = selected_graph
-        config = {"recursion_limit": 30}
-        final_state = await graph_to_use.ainvoke(initial_state, config=config)
-        final_state = auto_optimize_state(final_state, logger)
-
-        # Check memory health
-        memory_health = check_memory_health(final_state, logger)
-        if memory_health["status"] != "healthy":
-            logger.warning(f"⚠️ Memory: {memory_health['memory_info']['total_mb']:.2f} MB")
-
-        # Handle errors
-        if final_state.get("error"):
-            error = final_state["error"]
-            return JSONResponse(
-                status_code=error.get("status_code", 500),
-                content={
-                    "status": error.get("status", "error"),
-                    "message": error.get("message", "An error occurred"),
-                    "searchResults": [],
-                    "records": [],
-                }
-            )
-
-        # Get response and cache it
-        response_data = final_state.get("completion_data", final_state.get("response"))
-
-        if isinstance(response_data, JSONResponse):
-            response_content = response_data.body.decode() if hasattr(response_data, 'body') else None
-            if response_content:
-                try:
-                    response_dict = json.loads(response_content)
-                    cache.set_llm_response(query_info.query, response_dict, cache_context)
-                except Exception:
-                    pass
-        elif isinstance(response_data, dict):
-            cache.set_llm_response(query_info.query, response_data, cache_context)
-
-        total_time = (time.time() - start_time) * 1000
-        logger.info(f"✅ Query completed in {total_time:.0f}ms")
-
-        # Add performance metadata if available
-        if "_performance_tracker" in final_state and isinstance(response_data, dict):
-            response_data["_performance"] = final_state.get("performance_summary", {})
-
-        return response_data
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in askAI: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-async def stream_response(
-    query_info: dict[str, Any],
-    user_info: dict[str, Any],
-    llm: BaseChatModel,
-    logger: Logger,
-    retrieval_service: RetrievalService,
-    graph_provider: IGraphDBProvider,
-    reranker_service: RerankerService,
-    config_service: ConfigurationService,
-    org_info: dict[str, Any] = None,
-    modelName: str = None,
-    modelKey: str = None,
-    is_multimodal_llm: bool = False,
-    client_name: str | None = None,
-) -> AsyncGenerator[str, None]:
-    """Stream agent response"""
-    try:
-        selected_graph = await _select_agent_graph_for_query(
-            query_info, logger, llm,
-            config_service=config_service,
-            graph_provider=graph_provider,
-            is_multimodal_llm=is_multimodal_llm,
-            org_id=user_info.get("orgId", ""),
-        )
-
-        has_sql_connector = await has_sql_connector_configured(
-            graph_provider, user_info["userId"], user_info["orgId"]
-        )
-        has_slack_connector = await has_slack_connector_configured(
-            graph_provider, user_info["userId"], user_info["orgId"]
-        )
-        if selected_graph == deep_agent_graph:
-            graph_type = "deep"
-            initial_state = build_deep_agent_state(
-                query_info,
-                user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                org_info,
-                modelName,
-                modelKey,
-                has_sql_connector=has_sql_connector,
-                is_multimodal_llm=is_multimodal_llm,
-                has_slack_connector=has_slack_connector,
-            )
-        else:
-            graph_type = "react" if selected_graph == modern_agent_graph else "legacy"
-            initial_state = build_initial_state(
-                query_info,
-                user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                modelName,
-                modelKey,
-                org_info,
-                graph_type,
-                has_sql_connector=has_sql_connector,
-                is_multimodal_llm=is_multimodal_llm,
-                has_slack_connector=has_slack_connector,
-                client_name=client_name,
-            )
-
-        config = {
-            "recursion_limit": 50,
-            "configurable": {
-                "client_name": client_name,
-            },
-        }
-        chunk_count = 0
-
-        graph_to_use = selected_graph
-        async for chunk in graph_to_use.astream(initial_state, config=config, stream_mode="custom"):
-            chunk_count += 1
-            if isinstance(chunk, dict) and "event" in chunk:
-                event_type = chunk.get('event', 'unknown')
-                data = chunk.get('data', {})
-                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
-            else:
-                logger.warning(f"Unexpected chunk format: {type(chunk)}")
-
-        logger.info(f"Streaming completed. Total chunks: {chunk_count}")
-    except Exception as e:
-        logger.error(f"Error in stream_response: {e}", exc_info=True)
-        yield f"event: error\ndata: {json.dumps({'message': str(e), 'type': 'stream_error'})}\n\n"
-
-
-@router.post("/agent-chat-stream", dependencies=[Depends(require_scopes(OAuthScopes.AGENT_EXECUTE))])
-async def askAIStream(request: Request, query_info: ChatQuery) -> StreamingResponse:
-    """Process chat query with streaming"""
-    try:
-        services = await get_services(request)
-        logger = services["logger"]
-        graph_provider = services["graph_provider"]
-        reranker_service = services["reranker_service"]
-        retrieval_service = services["retrieval_service"]
-        config_service = services["config_service"]
-        llm = services["llm"]
-        user_context = _get_user_context(request)
-
-        record_event("agent_run", {
-            "orgId": user_context.get("orgId"),
-            "userId": user_context.get("userId"),
-            "email": user_context.get("email"),
-            "domain": user_context.get("domain"),
-            "has_tools": bool(query_info.tools),
-            "streaming": True,
-        })
-
-        user_doc = await _get_user_document(user_context["userId"], services["graph_provider"], services["logger"])
-        enriched_user_info = await _enrich_user_info(user_context, user_doc)
-        org_info = await _get_org_info(user_context, services["graph_provider"], services["logger"])
-
-        client_name = request.headers.get("Client-Name")
-        return StreamingResponse(
-            stream_response(
-                query_info.model_dump(),
-                enriched_user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                org_info,
-                query_info.modelName,
-                query_info.modelKey,
-                client_name=client_name,
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        services["logger"].error(f"Error in askAIStream: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # ============================================================================
@@ -3089,193 +2685,93 @@ async def update_agent_permission(request: Request, agent_id: str) -> JSONRespon
 # Agent Chat Endpoints
 # ============================================================================
 
+def _parse_sse_events(chunk: str) -> list[tuple[str, Any]]:
+    """Parses one or more `event: X\\ndata: Y\\n\\n` frames out of a raw SSE
+    text chunk. Tolerant of a chunk containing multiple frames or a partial
+    trailing one (returns only whole frames found) -- `chat()` drains the
+    WHOLE stream before deciding anything, so a frame boundary split across
+    two `body_iterator` chunks is completed by the next chunk's data before
+    any frame is parsed here, not lost."""
+    events: list[tuple[str, Any]] = []
+    for block in chunk.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        event_name = None
+        data_line = None
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event_name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_line = line[len("data:"):].strip()
+        if event_name is None or data_line is None:
+            continue
+        try:
+            events.append((event_name, json.loads(data_line)))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
 @router.post("/{agent_id}/chat", dependencies=[Depends(require_scopes(OAuthScopes.AGENT_EXECUTE))])
-async def chat(request: Request, agent_id: str, chat_query: ChatQuery) -> JSONResponse:
-    """Chat with an agent"""
-    try:
-        services = await get_services(request)
-        logger = services["logger"]
-        graph_provider = services["graph_provider"]
-        retrieval_service = services["retrieval_service"]
-        llm = services["llm"]
-        reranker_service = services["reranker_service"]
-        config_service = services["config_service"]
-        user_context = _get_user_context(request)
-        org_key = user_context["orgId"]
+async def chat(request: Request, agent_id: str) -> JSONResponse:
+    """Chat with an agent (non-streaming).
 
-        record_event("agent_run", {
-            "orgId": user_context.get("orgId"),
-            "userId": user_context.get("userId"),
-            "email": user_context.get("email"),
-            "domain": user_context.get("domain"),
-            "has_tools": bool(getattr(chat_query, "tools", None)),
-            "streaming": False,
-        })
+    Runs the exact same agent-loop pipeline `chat_stream()` does -- same
+    setup (toolset config loading, permission checks, LLM resolution, all
+    ~250 lines of it), same `run_agent_loop_stream()` call -- by invoking
+    that route function directly and draining its `StreamingResponse.
+    body_iterator` instead of streaming it to the client. This is
+    deliberately NOT a second copy of that setup logic: LangGraph's own
+    separate non-streaming code path (`_select_agent_graph_for_query()` +
+    `graph.ainvoke()`) was removed with the rest of LangGraph, and
+    `chat_stream()`'s setup is too security-sensitive (credential lookup
+    scoping — see its own comments) to risk drifting via duplication.
 
-        org_info = await _get_org_info(user_context, services["graph_provider"], logger)
+    Node.js's `createAgentConversation` (`POST /api/v1/agents/:agentKey/
+    conversations` -> `POST /api/v1/agent/{agent_id}/chat`) is this
+    endpoint's one live caller (see Phase 0 audit) — it reads whichever of
+    `completion_data`'s fields are present (`answer` required, everything
+    else optional; see `buildAIResponseMessage` in
+    `enterprise_search/utils/utils.ts`), so returning agent-loop's
+    `completion_data` shape as-is (no `reason`/`answerMatchType` on the
+    success path -- see `respond.py`) does not break it.
+    """
+    streaming_response = await chat_stream(request, agent_id)
+    if not isinstance(streaming_response, StreamingResponse):
+        return streaming_response  # pragma: no cover - chat_stream() only returns StreamingResponse today
 
-        agent = await services["graph_provider"].get_agent(agent_id, org_key)
-        if not agent:
-            raise AgentNotFoundError(agent_id)
-        is_service_account = agent.get("isServiceAccount", False)
+    completion_data: dict[str, Any] | None = None
+    error_payload: dict[str, Any] | None = None
+    async for raw_chunk in streaming_response.body_iterator:
+        text = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
+        for event_name, data in _parse_sse_events(text):
+            if event_name == "complete" and isinstance(data, dict):
+                completion_data = data
+            elif event_name == "error" and isinstance(data, dict):
+                error_payload = data
 
-        if is_service_account:
-            enriched_user_info = await _enrich_user_info_for_service_account_agent_chat(
-                agent, graph_provider, logger
-            )
-            enriched_user_info = await _resolve_service_account_caller_identity(
-                enriched_user_info, chat_query, user_context, graph_provider, logger,
-            )
-            perm = {"can_edit": False, "can_share": False, "role": "viewer"}
-        else:
-            # Standard user path: look up the user document and verify permissions.
-            user_doc = await _get_user_document(user_context["userId"], services["graph_provider"], logger)
-            enriched_user_info = await _enrich_user_info(user_context, user_doc)
-            perm = await services["graph_provider"].check_agent_permission(agent_id, user_doc["_key"], org_key)
-            if not perm:
-                raise AgentNotFoundError(agent_id)
-
-        agent.update(perm)
-
-        agent_knowledge = agent.get("knowledge", [])
-
-        # Build filters from knowledge array (new format)
-        filters = chat_query.filters.copy() if chat_query.filters else {}
-
-        if not chat_query.filters:
-            # Extract knowledge sources from agent's knowledge array
-            knowledge_connector_ids = [
-                k.get("connectorId") for k in agent_knowledge
-                if isinstance(k, dict) and k.get("connectorId")
-            ]
-            kb_ids = _extract_kb_app_ids(agent_knowledge)
-
-            filters = {
-                "apps": knowledge_connector_ids,
-                "kb": kb_ids,
-                "vectorDBs": agent.get("vectorDBs", []),
-                "connectors": agent.get("connectors", [])
-            }
-
-        # Override with chat query filters if provided
-        if chat_query.filters:
-            for key in ["apps", "kb", "vectorDBs"]:
-                if chat_query.filters.get(key) is not None:
-                    filters[key] = chat_query.filters[key]
-
-        if agent.get("connectors"):
-            filters["connectors"] = agent.get("connectors", [])
-
-        _chat_conn_ids = [
-            k["connectorId"] for k in agent_knowledge
-            if isinstance(k, dict) and k.get("connectorId")
-        ]
-        connector_configs = await fetch_connector_configs(config_service, _chat_conn_ids)
-        web_search_provider = _parse_web_search(agent.get("webSearch"))
-        web_search_tool_config = await _resolve_web_search_tool_config(
-            web_search_provider,
-            config_service,
-            logger,
+    if error_payload is not None:
+        return JSONResponse(
+            status_code=error_payload.get("status_code", 400),
+            content={
+                "status": error_payload.get("status", "error"),
+                "message": error_payload.get("message") or error_payload.get("error") or "An error occurred",
+                "searchResults": [],
+                "records": [],
+            },
         )
-        if not _is_web_search_enabled(chat_query.tools):
-            web_search_provider = None
-            web_search_tool_config = None
-
-        # Build query info
-        query_info = {
-            "query": chat_query.query,
-            "limit": chat_query.limit,
-            "messages": [],
-            "previous_conversations": chat_query.previousConversations,
-            "quickMode": chat_query.quickMode,
-            "chatMode": chat_query.chatMode,
-            "retrievalMode": chat_query.retrievalMode,
-            "filters": filters,
-            "tools": chat_query.tools if chat_query.tools is not None else agent.get("tools"),
-            "knowledge": agent_knowledge,
-            "connector_configs": connector_configs,
-            "systemPrompt": agent.get("systemPrompt"),
-            "instructions": agent.get("instructions"),
-            "timezone": chat_query.timezone,
-            "currentTime": chat_query.currentTime,
-            "conversationId": chat_query.conversationId,
-            "is_service_account": is_service_account,
-            "webSearch": web_search_provider,
-            "webSearchConfig": web_search_tool_config,
-            "attachments": chat_query.attachments,
-        }
-        selected_graph = await _select_agent_graph_for_query(
-            query_info, logger, llm,
-            config_service=services["config_service"],
-            graph_provider=graph_provider,
-            org_id=enriched_user_info.get("orgId", ""),
+    if completion_data is None:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "The agent did not produce a response.",
+                "searchResults": [],
+                "records": [],
+            },
         )
-
-        has_sql_connector = await has_sql_connector_configured(
-            graph_provider, enriched_user_info["userId"], enriched_user_info["orgId"]
-        )
-        has_slack_connector = await has_slack_connector_configured(
-            graph_provider, enriched_user_info["userId"], enriched_user_info["orgId"]
-        )
-        if selected_graph == deep_agent_graph:
-            initial_state = build_deep_agent_state(
-                query_info,
-                enriched_user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                org_info,
-                chat_query.modelName,
-                chat_query.modelKey,
-                has_sql_connector=has_sql_connector,
-                has_slack_connector=has_slack_connector,
-            )
-        else:
-            graph_type = "react" if selected_graph == modern_agent_graph else "legacy"
-            initial_state = build_initial_state(
-                query_info,
-                enriched_user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                chat_query.modelName,
-                chat_query.modelKey,
-                org_info,
-                graph_type,
-                has_sql_connector=has_sql_connector,
-                has_slack_connector=has_slack_connector,
-            )
-
-        graph_to_use = selected_graph
-        config = {"recursion_limit": 50}
-        final_state = await graph_to_use.ainvoke(initial_state, config=config)
-
-        # Handle errors
-        if final_state.get("error"):
-            error = final_state["error"]
-            return JSONResponse(
-                status_code=error.get("status_code", 500),
-                content={
-                    "status": error.get("status", "error"),
-                    "message": error.get("message", "An error occurred"),
-                    "searchResults": [],
-                    "records": [],
-                }
-            )
-
-        return final_state.get("completion_data", final_state["response"])
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in chat: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    return JSONResponse(content=completion_data)
 
 
 @router.post("/{agent_id}/chat/stream", dependencies=[Depends(require_scopes(OAuthScopes.AGENT_EXECUTE))])
@@ -3643,39 +3139,22 @@ async def chat_stream(request: Request, agent_id: str) -> StreamingResponse:
 
         client_name = request.headers.get("client-name")
 
-        if _use_agent_loop():
-            generator = run_agent_loop_stream(
-                query_info,
-                enriched_user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                org_info,
-                model_name=model_name,
-                model_key=model_key,
-                is_multimodal_llm=is_multimodal_llm,
-                client_name=client_name,
-                protocol=protocol,
-            )
-        else:
-            generator = stream_response(
-                query_info,
-                enriched_user_info,
-                llm,
-                logger,
-                retrieval_service,
-                graph_provider,
-                reranker_service,
-                config_service,
-                org_info,
-                modelName=model_name,
-                modelKey=model_key,
-                is_multimodal_llm=is_multimodal_llm,
-                client_name=client_name,
-            )
+        generator = run_agent_loop_stream(
+            query_info,
+            enriched_user_info,
+            llm,
+            logger,
+            retrieval_service,
+            graph_provider,
+            reranker_service,
+            config_service,
+            org_info,
+            model_name=model_name,
+            model_key=model_key,
+            is_multimodal_llm=is_multimodal_llm,
+            client_name=client_name,
+            protocol=protocol,
+        )
 
         return StreamingResponse(
             generator,

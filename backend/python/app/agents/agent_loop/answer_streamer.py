@@ -103,7 +103,7 @@ class TerminalAnswerStreamer:
     def _start_turn(self) -> None:
         """Snapshot the citation state for this turn's normalization calls.
         Stable within a turn since no tools execute mid-model-call."""
-        from app.modules.agents.qna.nodes import _extract_web_records_from_tool_results
+        from app.modules.agents.qna.helpers import _extract_web_records_from_tool_results
 
         self._buffer = ""
         tool_results = self._context.tool_state.get("all_tool_results", [])

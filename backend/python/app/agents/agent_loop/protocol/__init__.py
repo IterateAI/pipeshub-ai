@@ -24,7 +24,12 @@ already expects, so `stream_bridge.py`'s queue/serialization loop needs no
 protocol branch at all — see `agui.py::frame()`.
 """
 
-from app.agents.agent_loop.protocol.agui import AGUIEventType, frame, new_id
+from app.agents.agent_loop.protocol.agui import (
+    AGUIEventType,
+    frame,
+    new_id,
+    resolve_protocol,
+)
 from app.agents.agent_loop.protocol.agui_emitter import AGUIEventEmitter
 from app.agents.agent_loop.protocol.formatter import (
     AGUIFormatter,
@@ -41,6 +46,7 @@ __all__ = [
     "AGUIEventType",
     "frame",
     "new_id",
+    "resolve_protocol",
     "AGUIEventEmitter",
     "ProtocolFormatter",
     "ArtifactSSEPayload",

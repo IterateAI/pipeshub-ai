@@ -73,7 +73,7 @@ from app.agent_loop_lib.transport.opik_tracing import (
 from app.agents.agent_loop.error_classification import classify_error
 from app.agents.agent_loop.hooks.ask_user_question import _ASK_USER_QUESTION_TOOL_NAMES
 from app.agents.agent_loop.reasoning_persistence import build_reasoning_payload, filter_reasoning_parts
-from app.modules.agents.qna.nodes import (
+from app.modules.agents.qna.helpers import (
     _extract_web_records_from_tool_results,
     _tool_names_and_results_from_state,
 )

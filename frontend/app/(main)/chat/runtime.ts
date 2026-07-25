@@ -238,7 +238,7 @@ export function buildStreamChatRequestForSlot(
   const request: StreamChatRequest = {
     query,
     ...effectiveModel,
-    ...buildStreamRequestModeFields(currentState.settings),
+    ...buildStreamRequestModeFields(currentState.settings, isAgent),
     timezone: getClientTimezone(),
     currentTime: getClientCurrentTime(),
     filters: resolvedFilters,

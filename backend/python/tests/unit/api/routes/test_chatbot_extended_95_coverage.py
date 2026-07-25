@@ -7,6 +7,19 @@ from fastapi import HTTPException
 
 from app.models.blocks import BlockType
 
+
+@pytest.fixture(autouse=True)
+def _force_legacy_chat_pipeline(monkeypatch):
+    """This suite exercises the pre-migration direct-LLM pipeline
+    (`_generate_internal_search_stream`/`_generate_web_search_stream`) via
+    patches on the functions those paths call. `askAIStream` now defaults
+    to the agent-loop pipeline (`PIPESHUB_CHAT_USE_AGENT_LOOP=true`), which
+    would silently bypass every mock below -- force the legacy pipeline so
+    this suite keeps testing what it patches. The agent-loop default path
+    has its own coverage under `tests/unit/agents/chat_modes/`."""
+    monkeypatch.setenv("PIPESHUB_CHAT_USE_AGENT_LOOP", "false")
+
+
 # ---------------------------------------------------------------------------
 # Helpers: collapse, MIME, attachment extension
 # ---------------------------------------------------------------------------

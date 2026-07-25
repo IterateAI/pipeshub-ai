@@ -25,7 +25,6 @@ import {
 } from '@/chat/components/chat-panel';
 import { MobileQueryOptionsSheet } from '@/chat/components/chat-panel/expansion-panels/mobile-query-options-sheet';
 import { MobileQueryModesSheet } from '@/chat/components/chat-panel/expansion-panels/mobile-query-modes-sheet';
-import { AgentStrategyDropdown } from '@/chat/components/agent-strategy-dropdown';
 import { getQueryModeConfig } from '@/chat/constants';
 import { useChatStore, ctxKeyFromAgent } from '@/chat/store';
 import { useIsMobile } from '@/lib/hooks/use-is-mobile';
@@ -1852,16 +1851,6 @@ export function ChatInput({
                 }}
               >
                 <Flex direction="column" gap="1">
-                  {/* Agent Strategy (when applicable) */}
-                  {settings.queryMode === 'agent' && !isAgentChat && (
-                    <Box style={{ padding: 'var(--space-1) var(--space-2)' }}>
-                      <AgentStrategyDropdown
-                        value={settings.agentStrategy}
-                        onChange={setAgentStrategy}
-                        accentColor={activeToggleColor}
-                      />
-                    </Box>
-                  )}
 
                   {/* Collections / Connectors */}
                   {settings.queryMode !== 'web-search' && (
@@ -1997,13 +1986,6 @@ export function ChatInput({
           ) : (
             /* Desktop: full controls */
             <>
-              {settings.queryMode === 'agent' && !isAgentChat ? (
-                <AgentStrategyDropdown
-                  value={settings.agentStrategy}
-                  onChange={setAgentStrategy}
-                  accentColor={activeToggleColor}
-                />
-              ) : null}
 
               {/* Action buttons group */}
               <Flex align="center" gap="1">

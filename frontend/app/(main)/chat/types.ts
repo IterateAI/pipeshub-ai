@@ -158,6 +158,7 @@ export type StreamChatModePayload =
   | 'web_search'
   | 'image'
   | 'internal_search'
+  | 'agent'
   | `agent:${AgentStrategyApiSegment}`;
 
 /** Maps UI agent strategy to the API `agent:` segment (plan-execute → planExecute). */
@@ -735,15 +736,27 @@ export interface StreamChatRequest {
   attachments?: AttachmentRef[];
 }
 
-/** Builds mode-related fields for stream/regenerate payloads from settings. */
-export function buildStreamRequestModeFields(settings: ChatSettings): Pick<
-  StreamChatRequest,
-  'chatMode'
-> {
+/**
+ * Builds mode-related fields for stream/regenerate payloads from settings.
+ *
+ * `isScopedAgent` distinguishes the two very different consumers of Agent
+ * `QueryMode`: a conversation scoped to a specific custom Agent (`agentId`
+ * set) still needs the `agent:<strategy>` wire value — its endpoint
+ * (`agent.py`) unwraps that via {@link streamChatModeToAgentApiChatMode} to
+ * drive `PipesHubAgentFactory`'s loop selection. The *main* chat's Agent
+ * mode (no `agentId` — "Universal Agent Mode") has no such strategy
+ * concept server-side (`chat_modes/policy.py`'s `AGENT_POLICY` decides
+ * internal-search vs web-search vs both from the query itself), so it must
+ * send the plain `'agent'` value instead.
+ */
+export function buildStreamRequestModeFields(
+  settings: ChatSettings,
+  isScopedAgent = false
+): Pick<StreamChatRequest, 'chatMode'> {
   if (settings.queryMode === 'agent') {
-    return {
-      chatMode: `agent:${agentStrategyToApiSegment(settings.agentStrategy)}`,
-    };
+    return isScopedAgent
+      ? { chatMode: `agent:${agentStrategyToApiSegment(settings.agentStrategy)}` }
+      : { chatMode: 'agent' };
   }
   if (settings.queryMode === 'web-search') {
     return {

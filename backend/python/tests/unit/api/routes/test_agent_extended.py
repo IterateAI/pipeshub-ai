@@ -26,8 +26,6 @@ Targets additional coverage for:
 - _create_knowledge_edges: batch create edges failure
 - _create_toolset_edges: empty toolsets
 - _create_toolset_edges: batch upsert returns None
-- _select_agent_graph_for_query: quick mode
-- stream_response: various paths
 """
 
 import json
@@ -704,34 +702,6 @@ class TestCreateToolsetEdges:
         )
         assert created == []
         assert len(failed) == 1
-
-
-# ============================================================================
-# _select_agent_graph_for_query: quick mode
-# ============================================================================
-
-
-class TestSelectAgentGraphQuickMode:
-    @pytest.mark.asyncio
-    async def test_quick_mode(self):
-        from app.api.routes.agent import _select_agent_graph_for_query, agent_graph
-
-        query_info = {"chatMode": "quick"}
-        # chatMode="quick" is not handled explicitly, falls to default
-        result = await _select_agent_graph_for_query(query_info, MagicMock(), MagicMock())
-        # "quick" is not "deep" or "planExecute"/"verification" or "auto", so hits default
-        assert result is agent_graph
-
-    @pytest.mark.asyncio
-    async def test_plan_execute_mode(self):
-        """`planExecute` is the current wire value for this route's react
-        graph; `verification` (pre-rename) is covered elsewhere and must
-        map to the SAME graph."""
-        from app.api.routes.agent import _select_agent_graph_for_query, modern_agent_graph
-
-        query_info = {"chatMode": "planExecute"}
-        result = await _select_agent_graph_for_query(query_info, MagicMock(), MagicMock())
-        assert result is modern_agent_graph
 
 
 # ============================================================================

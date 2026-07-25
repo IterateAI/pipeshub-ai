@@ -159,6 +159,10 @@ class _FetchFullRecordTool(Tool):
                 ))
             self._context.tool_state["citation_ref_mapper"] = ref_mapper
             text = "\n".join(parts)
+            text += (
+                "\n\nCite facts from the above using the Citation ID for each block "
+                "as a markdown link, e.g. [source](ref2). Do NOT use external URLs as citations."
+            )
             not_available = result.get("not_available_ids", [])
             if not_available:
                 ids_str = ", ".join(f"'{rid}'" for rid in not_available)
@@ -192,33 +196,6 @@ def _grant(spec: "AgentSpec | None", *, require_internal_search_reference: bool)
     if require_internal_search_reference and not (set(spec.tool_names) & INTERNAL_SEARCH_TOOL_NAMES):
         return
     spec.tool_names.append(_FETCH_FULL_RECORD_TOOL_NAME)
-
-
-def eagerly_register_fetch_full_record(
-    registry: Any,
-    collector: CitationCollector,
-    context: AgentContext,
-) -> bool:
-    """Register `_FetchFullRecordTool` on *registry* if `collector.virtual_records`
-    is already populated — e.g. after prefetch retrieval fills `tool_state`
-    before the first agent turn.
-
-    Returns ``True`` if the tool was registered (or was already present),
-    ``False`` if the virtual-record map is empty (nothing to register).
-
-    Callers: `chat_modes/bridge.py` after prefetch completes; mirrors what
-    `citation_tracking` (the POST_TOOL_USE hook) does mid-run, ensuring the
-    tool is available from turn 1 when prefetch skips any tool call.
-    """
-    if not collector.virtual_records:
-        return False
-    from app.agent_loop_lib.tools.registry import ToolRegistry
-
-    if not isinstance(registry, ToolRegistry):
-        return False
-    registry.register_tool_if_absent(_FetchFullRecordTool(collector, context))
-    _grant(context.root_agent_spec, require_internal_search_reference=False)
-    return True
 
 
 def citation_tracking(
@@ -258,9 +235,36 @@ def citation_tracking(
         # directly on a later turn — see module docstring.
         if run_scope is not None:
             _grant(run_scope.spec, require_internal_search_reference=False)
+            if getattr(run_scope, "visible_tools", None) is not None:
+                run_scope.visible_tools.add(_FETCH_FULL_RECORD_TOOL_NAME)
         _grant(context.root_agent_spec, require_internal_search_reference=True)
 
     return _middleware
 
 
-__all__ = ["CitationCollector", "citation_tracking", "eagerly_register_fetch_full_record"]
+def ensure_fetch_full_record_available(
+    context: AgentContext,
+    *,
+    run_scope: object | None = None,
+    registry: object | None = None,
+) -> None:
+    """Register ``_FetchFullRecordTool`` and grant it — callable outside POST_TOOL_USE.
+
+    ``citation_tracking`` handles this reactively (after a tool call), but
+    ``attachment_rehydration`` needs the tool available BEFORE the model's
+    first action on a follow-up turn.  This function extracts the shared
+    registration + grant logic so both call sites stay in sync.
+
+    ``run_scope`` and ``registry`` are optional — if omitted the caller is
+    responsible for ensuring the tool is visible (e.g. via ``_grant``
+    directly).  When provided they mirror ``citation_tracking``'s behaviour.
+    """
+    collector = CitationCollector(context)
+    if registry is not None:
+        registry.register_tool_if_absent(_FetchFullRecordTool(collector, context))
+    if run_scope is not None and hasattr(run_scope, "spec"):
+        _grant(run_scope.spec, require_internal_search_reference=False)
+    _grant(context.root_agent_spec, require_internal_search_reference=False)
+
+
+__all__ = ["CitationCollector", "citation_tracking", "ensure_fetch_full_record_available"]

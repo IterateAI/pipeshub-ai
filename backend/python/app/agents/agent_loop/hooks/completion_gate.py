@@ -39,21 +39,48 @@ _DEFAULT_MAX_NUDGES = 2
 
 _FILE_GENERATION_TOOL_NAMES = frozenset({"run_code", "coding_agent"})
 
-# Deliberately narrow: matches the exact set of outputs the system prompt's
-# "Code Execution (MANDATORY for file generation)" section calls out (see
-# `prompt_builder.py`). Broader wording ("report", "summary", ...) is left
-# out on purpose — those are routinely satisfied by a plain text answer,
-# and over-triggering here just burns a weak model's turn budget on
-# unnecessary nudges.
-_FILE_GENERATION_RE = re.compile(
+# Two-tier detection: bare file-format keywords (pdf, csv, xlsx, …) are
+# ambiguous — they can refer to an UPLOADED input file ("analyze this pdf")
+# just as easily as a REQUESTED output ("create a pdf report"). To avoid
+# false positives when a user attaches a file for analysis, bare format
+# keywords only trigger when paired with a generation-intent verb/phrase.
+# Unambiguous output words (chart, spreadsheet, presentation, …) trigger
+# unconditionally. Over-triggering burns weak models' turn budgets on
+# unnecessary nudges; false negatives are preferred (see module docstring).
+
+_UNAMBIGUOUS_GENERATION_RE = re.compile(
     r"\b("
-    r"pdf|docx?|xlsx?|pptx?|csv|"
     r"spreadsheet|presentation|slide\s?deck|"
     r"downloadable\s+file|generate[sd]?\s+a\s+file|"
     r"chart|graph|plot|"
-    r"word\s+document|excel\s+file|"
-    r"\.pdf|\.docx?|\.xlsx?|\.pptx?|\.csv"
+    r"word\s+document|excel\s+file"
     r")\b",
+    re.IGNORECASE,
+)
+
+_FORMAT_KW = r"(?:pdf|docx?|xlsx?|pptx?|csv)"
+_CONTEXTUAL_GENERATION_RE = re.compile(
+    r"(?:"
+    # creation verb → optional determiner → 0-2 modifier words → format keyword.
+    # Word-count limit (not char-count) prevents "create a ticket for the pdf"
+    # from matching while still catching "create a detailed pdf report".
+    r"(?:create|make|generate|build|export|produce|save|convert|"
+    r"give\s+me|send\s+me|need|want)"
+    r"\s+(?:(?:a|an|the|me\s+a|me\s+an)\s+)?"
+    r"(?:\S+\s+){0,2}\b" + _FORMAT_KW + r"\b"
+    r"|"
+    # creation verb + dotted file extension (e.g. "export the results.csv")
+    # The dot is a strong disambiguator — nobody mentions "results.csv"
+    # without referring to an actual file.
+    r"(?:create|make|generate|build|export|produce|save|convert|"
+    r"give\s+me|send\s+me|need|want)\s.{0,30}\." + _FORMAT_KW + r"\b"
+    r"|"
+    # "as/into/to (a) format"
+    r"\b(?:as|into|to)\s+(?:a\s+)?" + _FORMAT_KW + r"\b"
+    r"|"
+    # "format report/output" — strong signal the format IS the deliverable
+    r"\b" + _FORMAT_KW + r"\s+(?:report|output)\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -77,8 +104,19 @@ def looks_like_file_generation_request(*texts: str) -> bool:
     resolved goal description: does this request ask for a generated file?
     Cheap and conservative by design — see the module docstring for why a
     false negative (missed file request) is preferred over a false
-    positive (spurious nudges on an unrelated request)."""
-    return any(_FILE_GENERATION_RE.search(text) for text in texts if text)
+    positive (spurious nudges on an unrelated request).
+
+    Bare format keywords (pdf, csv, …) require generation-intent context
+    to avoid triggering on "analyze this pdf" when the user uploaded a file
+    for analysis."""
+    for text in texts:
+        if not text:
+            continue
+        if _UNAMBIGUOUS_GENERATION_RE.search(text):
+            return True
+        if _CONTEXTUAL_GENERATION_RE.search(text):
+            return True
+    return False
 
 
 def _response_text(message: object) -> str:

@@ -89,15 +89,19 @@ from app.agents.agent_loop.hooks import (
     ToolErrorTracker,
     artifact_context_reminder,
     ask_user_question_sse,
+    attachment_rehydration,
     citation_tracking,
     completion_gate,
     conversation_enrichment,
     internal_search_attempted_tracking,
     knowledge_first_gate,
     looks_like_file_generation_request,
+    resolve_attachments_for_goal,
+    resolve_history_attachments,
     result_accumulation,
     retry_with_status,
     seed_visible_tools_from_history,
+    shape_image_injection,
     stash_tool_call_metadata,
 )
 from app.agent_loop_lib.tools.builtin.sandbox.coding_sandbox import CodingSandboxTool
@@ -342,12 +346,23 @@ class PipesHubAgentFactory:
         )
 
         # Read by `hooks/completion_gate.py` (already wired onto `hooks`
-        # above) once the agent actually runs — computed from both the raw
-        # query and the intent-resolved goal description since either can
-        # carry the file-format wording ("... as a PDF", "export to CSV").
+        # above) once the agent actually runs — computed from the raw query
+        # and the ORIGINAL goal description (pre-attachment), since attachment
+        # text often contains file-format tokens (e.g. ".pdf" in a filename)
+        # that would false-positive when the user only uploaded a file for
+        # analysis, not requested one to be generated.
         context.file_generation_requested = looks_like_file_generation_request(
             query, goal.description,
         )
+
+        if not clarifying_questions:
+            attachment_text, image_blocks = await resolve_attachments_for_goal(
+                context, logger,
+            )
+            if attachment_text:
+                goal.description = f"{goal.description}\n\n{attachment_text}"
+            if image_blocks:
+                context.attachment_image_blocks = image_blocks
 
         # Per-mode composition/tool-grant, keyed off `mode` (the resolved
         # `ModeDefinition` — see `modes.py`), never off `isinstance(loop, ...)`:
@@ -601,7 +616,7 @@ class PipesHubAgentFactory:
         context.run_id = agent.run_ctx.run_id
 
         if context.previous_conversations:
-            await self._seed_conversation_history(agent, context.previous_conversations)
+            await self._seed_conversation_history(agent, context.previous_conversations, context)
 
         return agent, runtime, goal, clarifying_questions
 
@@ -658,8 +673,10 @@ class PipesHubAgentFactory:
                 )
             )
 
-        # --- PRE_MODEL context-shaping pipeline (cheapest-first, L1→L9) ---
+        # --- PRE_MODEL context-shaping pipeline (cheapest-first, L0→L9) ---
         # Same ordering ControlPlane.start() uses for its context_engine.
+        # L0 injects image attachments into the initial UserMessage (no-op
+        # when context.attachment_image_blocks is empty — deferred check).
         # L1–L6 are pure-Python (no LLM call). L7a/L7b are LLM-backed
         # auto-compact — two phases so old conversation history is
         # summarized first (gentle, keep 12) and old turns second
@@ -667,6 +684,7 @@ class PipesHubAgentFactory:
         # L9 is the safety-net: validates tool_call/tool_result pairing
         # after all shapers ran — catches any orphans from shaper
         # interactions or future shapers that don't use safe_tail_boundary.
+        hooks.on(HookEvent.PRE_MODEL).use(shape_image_injection(context))     # L0
         hooks.on(HookEvent.PRE_MODEL).use(shape_budget_reduction())           # L1
         hooks.on(HookEvent.PRE_MODEL).use(shape_artifact_compaction(          # L2
             keep_last_n_turns=2,
@@ -715,6 +733,7 @@ class PipesHubAgentFactory:
         hooks.on(HookEvent.POST_TOOL_USE).use(internal_search_attempted_tracking(context))
 
         hooks.on(HookEvent.PRE_TURN).use(conversation_enrichment(context))
+        hooks.on(HookEvent.PRE_TURN).use(attachment_rehydration(context))
         hooks.on(HookEvent.PRE_TURN).use(artifact_context_reminder(context))
         hooks.on(HookEvent.PRE_TURN).use(seed_visible_tools_from_history(context))
 
@@ -744,40 +763,99 @@ class PipesHubAgentFactory:
         return hooks
 
     @staticmethod
-    async def _seed_conversation_history(agent: Agent, previous_conversations: list[dict[str, Any]]) -> None:
+    async def _seed_conversation_history(
+        agent: Agent,
+        previous_conversations: list[dict[str, Any]],
+        context: "AgentContext",
+    ) -> None:
         """Loads prior turns into the agent's `ContextManager` so the model
         sees them as ordinary conversation history on turn 0 — the
-        agent-loop equivalent of `nodes.py::_build_conversation_messages`
-        (called from `_build_planner_messages`, which both the legacy
-        planner AND `react_agent_node` use to seed multi-turn context).
+        agent-loop equivalent of `nodes.py::_build_conversation_messages`.
 
-        Text-only for attachments: unlike `_build_conversation_messages`,
-        this does not re-fetch/interleave historical PDF or image
-        attachment blocks — `conversation_enrichment` (Phase 5, PRE_TURN)
-        already covers the practical "reuse what the previous turn fetched"
-        signal via `goal.constraints`. The current turn's OWN attachments
-        are NOT resolved into multimodal blocks anywhere on this path today
-        — `RespondPipeline` used to do that right before its own
-        (now-removed, see `respond.py`) second LLM call, but the ReAct
-        loop's tool-calling turns never saw them either, so this was always
-        a synthesis-only capability, not a general one. Wiring current-turn
-        attachments into this method (agent-loop's `UserMessage` already
-        supports multimodal `Part` lists — see `agent_loop_lib/core/
-        messages.py` and `converters.py`) is a tracked follow-up.
-
-        NOT text-only for tool calls, though: see `_convert_conversation_turn`.
+        Document attachments (PDF, text, markdown) on historical user_query
+        turns are resolved from blob storage and appended to the
+        corresponding ``UserMessage``, mirroring the old agent's behavior
+        where the model always has file content directly in context.
+        ``virtual_record_id_to_result`` and ``citation_ref_mapper`` are
+        populated as a side-effect so ``dynamic_fetch_full_record`` remains
+        available as a post-compaction fallback.
         """
         from app.agent_loop_lib.context.manager import ContextManager
 
+        blob_store = context.blob_store
+        org_id = context.org_id
+
+        state = context.tool_state
+        ref_mapper = state.get("citation_ref_mapper")
+        if ref_mapper is None:
+            from app.utils.chat_helpers import CitationRefMapper  # noqa: PLC0415
+            ref_mapper = CitationRefMapper()
+            state["citation_ref_mapper"] = ref_mapper
+
+        vrmap: dict[str, Any] = state.get("virtual_record_id_to_result") or {}
+        if not isinstance(vrmap, dict):
+            vrmap = {}
+        state["virtual_record_id_to_result"] = vrmap
+
+        is_multimodal = context.is_multimodal_llm
+
         ctx = ContextManager()
         for turn in previous_conversations:
-            for message in _convert_conversation_turn(turn):
+            messages = _convert_conversation_turn(turn)
+
+            if (
+                turn.get("role") == "user_query"
+                and blob_store
+                and messages
+            ):
+                attachments = turn.get("attachments") or []
+                if attachments:
+                    extra_text, image_blocks = await resolve_history_attachments(
+                        attachments, blob_store, org_id, ref_mapper, vrmap,
+                        is_multimodal_llm=is_multimodal,
+                    )
+                    msg = messages[0]
+                    if extra_text:
+                        msg.content = f"{msg.content}\n\nAttached documents:\n{extra_text}"
+                    if image_blocks and is_multimodal:
+                        _inject_images_into_message(msg, image_blocks)
+                    elif image_blocks:
+                        names = [
+                            a.get("recordName", "image")
+                            for a in attachments
+                            if (a.get("mimeType") or "").lower().startswith("image/")
+                        ]
+                        placeholder = "\n".join(
+                            f"[Image attached: {n}]" for n in names
+                        )
+                        msg.content = f"{msg.content}\n\n{placeholder}"
+
+            for message in messages:
                 await ctx.add(message)
-        # `Agent.run()` only builds its own `ContextManager` when `self.
-        # _context is None` (see agent/__init__.py) — pre-seeding here,
-        # before `run()` is ever called, is the documented extension point
-        # for exactly this (`run_child()` does the same thing).
+
         agent.seed_context(ctx)
+
+
+def _inject_images_into_message(
+    msg: UserMessage,
+    image_blocks: list[dict[str, Any]],
+) -> None:
+    """Convert ``image_url`` dicts to ``ImagePart`` and set multipart content."""
+    from app.agent_loop_lib.core.messages import TextPart  # noqa: PLC0415
+    from app.agents.agent_loop.hooks.attachment_resolver import (  # noqa: PLC0415
+        _langchain_image_to_part,
+    )
+
+    parts = [_langchain_image_to_part(b) for b in image_blocks]
+    image_parts = [p for p in parts if p is not None]
+    if not image_parts:
+        return
+
+    content = msg.content
+    if isinstance(content, str):
+        msg.content = [TextPart(text=content), *image_parts]
+    elif isinstance(content, list):
+        msg.content = [*content, *image_parts]
 
 
 # Two previous `_EXPLORATION_RESULT_NOTE` headers (see `domain_agents.py`)

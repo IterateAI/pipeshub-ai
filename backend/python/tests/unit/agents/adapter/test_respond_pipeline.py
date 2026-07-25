@@ -1,10 +1,9 @@
 """`AnswerFinalizer` (`app/agents/agent_loop/respond.py`) — deterministic,
 no-LLM post-processing of the agent's OWN final-turn answer. Validates that
-it: never calls an LLM (there's nothing left in this class that could —
-`finalize_agent_answer` is pure Python), emits a single full-text fallback
-`answer_chunk` only when nothing (or the wrong thing) was already streamed
-live by `TerminalAnswerStreamer`, and correctly handles completion_data
-shape and the empty-answer / agent-failure fallback paths."""
+it: never calls an LLM (all post-processing is pure Python), emits a single
+full-text fallback `answer_chunk` only when nothing (or the wrong thing) was
+already streamed live by `TerminalAnswerStreamer`, and correctly handles
+completion_data shape and the empty-answer / agent-failure fallback paths."""
 
 from __future__ import annotations
 

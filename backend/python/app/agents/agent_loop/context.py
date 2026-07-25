@@ -73,6 +73,12 @@ class AgentContext(BaseModel):
     has_slack_knowledge: bool = False
     is_multimodal_llm: bool = False
 
+    # Image attachment blocks (LangChain ``image_url`` dicts) resolved by
+    # ``resolve_attachments_for_goal`` for the current turn. Consumed by
+    # ``shape_image_injection`` (PRE_MODEL hook) to inject ``ImagePart``
+    # objects into the initial ``UserMessage`` on every model call.
+    attachment_image_blocks: list[dict[str, Any]] = Field(default_factory=list)
+
     # Agent config
     system_prompt: str | None = None
     instructions: str | None = None

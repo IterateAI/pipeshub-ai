@@ -53,6 +53,33 @@ class TestLooksLikeFileGenerationRequest:
     def test_ignores_empty_strings(self) -> None:
         assert looks_like_file_generation_request("", "") is False
 
+    def test_no_match_on_attached_pdf_analysis(self) -> None:
+        """The exact false-positive that triggered the bug: user uploads a PDF
+        for analysis and the intent model mentions the format in its rewrite."""
+        assert looks_like_file_generation_request(
+            "explain me skills of prabal and wether he is fit for an agentic ai role ?",
+            "Analyze the attached PDF resume of Prabal Kaushik and assess fit for an agentic AI role",
+        ) is False
+
+    def test_no_match_on_bare_format_keyword(self) -> None:
+        assert looks_like_file_generation_request("summarize this pdf") is False
+
+    def test_matches_as_a_pdf(self) -> None:
+        assert looks_like_file_generation_request("save this as a pdf") is True
+
+    def test_matches_convert_to_csv(self) -> None:
+        assert looks_like_file_generation_request("convert the data to csv") is True
+
+    def test_matches_give_me_xlsx(self) -> None:
+        assert looks_like_file_generation_request("give me an xlsx with the numbers") is True
+
+    def test_no_match_when_verb_targets_different_object(self) -> None:
+        """Creation verbs targeting tickets/meetings/etc should not trigger
+        just because a format keyword appears later in the sentence."""
+        assert looks_like_file_generation_request("create a ticket for the pdf upload bug") is False
+        assert looks_like_file_generation_request("make a meeting to discuss csv imports") is False
+        assert looks_like_file_generation_request("create a jira issue about the xlsx parser") is False
+
 
 class TestCompletionGate:
     async def test_noop_when_tool_calls_present(self) -> None:

@@ -321,43 +321,57 @@ async def run_agent_loop_stream(
             for evt in context.formatter.error(context, message=user_message, code=error_code):
                 await context.event_sink.write(evt)
         finally:
-            # Guarantees sandbox teardown on normal completion, agent
-            # failure, AND client-disconnect cancellation alike (the outer
-            # `finally` below cancels this task, and `finally` blocks still
-            # run on `CancelledError`). Per-request manager, so a fresh
-            # request always gets a fresh sandbox.
-            #
-            # Detached/orphaned children must be torn down BEFORE that
-            # sandbox teardown — see `_cancel_orphaned_agent_tasks`.
+            # Flush any pending coalesced events and signal the SSE
+            # consumer loop FIRST, so the HTTP response closes promptly
+            # after the last real event.  Cleanup (orphan cancellation,
+            # sandbox teardown) runs AFTER — it can take seconds when
+            # Docker working directories contain large node_modules trees,
+            # and blocking _DONE behind that would keep the SSE connection
+            # (and the user-facing spinner) open unnecessarily.
+            await event_sink.flush()
+            await queue.put(_DONE)
+            log.info("agent-loop stream: _DONE enqueued, starting cleanup")
             await _cancel_orphaned_agent_tasks(agent)
             if context.sandbox_manager is not None:
                 try:
                     await context.sandbox_manager.destroy_all()
                 except Exception:
                     log.warning("agent-loop stream: sandbox cleanup failed", exc_info=True)
-            await event_sink.flush()
-            await queue.put(_DONE)
 
     producer = asyncio.create_task(_produce())
     heartbeat = asyncio.create_task(_heartbeat(queue)) if protocol == "agui" else None
+    normal_exit = False
     try:
         while True:
             item = await queue.get()
             if item is _DONE:
+                normal_exit = True
                 break
             yield f"event: {item['event']}\ndata: {json.dumps(item['data'])}\n\n"
     finally:
-        # Whatever drove us out of the loop (normal completion, or the
-        # generator being closed early by a disconnected client), make sure
-        # the background run is either finished or cancelled — never leaked.
         if heartbeat and not heartbeat.done():
             heartbeat.cancel()
-        if not producer.done():
+        if not normal_exit and not producer.done():
+            # Abnormal exit (client disconnect) — cancel the producer so
+            # the agent doesn't keep running against nothing, then wait
+            # for it to finish its finally-block cleanup.
             producer.cancel()
-        tasks = [producer]
-        if heartbeat:
-            tasks.append(heartbeat)
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if not normal_exit:
+            # Abnormal: must await the producer so cleanup runs to
+            # completion even after cancellation.
+            tasks = [producer]
+            if heartbeat:
+                tasks.append(heartbeat)
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Normal exit: _DONE was received, but the producer's
+            # cleanup tail (orphan cancellation, sandbox teardown) is
+            # still running.  Don't await it — the HTTP response should
+            # close promptly.  The cleanup task stays alive in the event
+            # loop and finishes on its own; each request has its own
+            # sandbox_manager, so there's no cross-request interference.
+            if heartbeat:
+                await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 __all__ = ["QueueEventSink", "run_agent_loop_stream", "sse_queue_maxsize"]

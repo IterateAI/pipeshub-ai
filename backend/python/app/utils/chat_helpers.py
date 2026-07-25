@@ -1347,12 +1347,14 @@ def get_enhanced_metadata(record:dict[str, Any],block:dict[str, Any]|None,meta:d
             if hide_weburl and recordId:
                 web_url = f"/record/{recordId}"
             elif (
-                web_url 
-                and origin != "UPLOAD" 
-                and record_type != RecordType.MAIL.value 
+                web_url
+                and origin != "UPLOAD"
+                and record_type != RecordType.MAIL.value
                 and block_type != BlockType.RECORD_SUMMARY.value
             ):
                 web_url = generate_text_fragment_url(web_url, block_text)
+            if not web_url and recordId:
+                web_url = f"/record/{recordId}"
 
             enhanced_metadata = {
                         "orgId": meta.get("orgId") or record.get("org_id", ""),

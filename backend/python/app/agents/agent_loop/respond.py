@@ -26,7 +26,7 @@ consuming `Agent.stream(goal)`'s real per-token events — see
 remaining job is the deterministic, non-LLM part every path still needs
 once the run is over: normalizing `[source](refN)`/URL markers in the
 already-produced text into structured `citations` (via
-`utils/streaming.py::finalize_agent_answer`), emitting the terminal
+`utils/citations.py::normalize_citations_and_chunks`), emitting the terminal
 `complete` event, and the error/empty-answer/`ask_user_question` fallback
 shapes. `streamed_answer` (what `TerminalAnswerStreamer` actually put on
 screen) is compared against `AgentResult.output` so the one edge case where
@@ -41,14 +41,13 @@ Trade-off accepted with this design: no more structured
 frontend response shape changes accordingly — see the plan), and current-turn
 attachments are no longer resolved into multimodal blocks here (they used to
 be injected right before the old second LLM call via `_ensure_attachment_
-blocks`/`_inject_attachment_blocks`). The ReAct loop's own tool-calling turns
-never saw the current turn's attachments either, so this is not a regression
-introduced by removing the second call — it's a pre-existing gap (attachments
-were only ever visible during the synthesis call), now more visible. Wiring
-current-turn attachments into the ReAct loop's own first turn (agent-loop's
-`UserMessage` already supports multimodal `Part` lists — see
-`agent_loop_lib/core/messages.py` and `agents/agent_loop/converters.py`) is
-tracked as a follow-up, not part of this fix.
+blocks`/`_inject_attachment_blocks`). Attachment handling is now in
+``hooks/attachment_resolver.py``: ``resolve_attachments_for_goal``
+reads the already-uploaded record from blob and populates citation maps
+on the first turn, and ``attachment_rehydration`` (PRE_TURN hook)
+re-populates citation maps on follow-up turns.
+``shape_image_injection`` (PRE_MODEL hook) injects ``ImagePart`` objects
+into the initial ``UserMessage`` when the LLM supports vision.
 
 Deliberately NOT ported: `respond_node`'s `execution_plan.can_answer_directly`
 direct-answer fast path, its `reflection_decision == "respond_clarify"`
@@ -77,7 +76,8 @@ from app.modules.agents.qna.helpers import (
     _extract_web_records_from_tool_results,
     _tool_names_and_results_from_state,
 )
-from app.utils.streaming import finalize_agent_answer
+from app.utils.citations import normalize_citations_and_chunks
+from app.utils.streaming import parse_confidence_from_answer
 
 if TYPE_CHECKING:
     from app.agents.agent_loop.context import AgentContext
@@ -184,6 +184,64 @@ class AnswerFinalizer:
             record_named_span_output(span, result)
             return result
 
+    def _normalize_all_parts_citations(
+        self,
+        parts: list[dict[str, Any]],
+        final_results: list[dict[str, Any]],
+        records: list[dict[str, Any]],
+        ref_to_url: dict[str, str] | None,
+        virtual_record_id_to_result: dict[str, dict[str, Any]],
+        web_records: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Normalize citations across ALL text parts for consistent numbering.
+
+        When the model produces multiple text turns (e.g. analysis → tool call
+        → summary), citation refs like ``[source](ref2)`` can appear in any
+        text part.  Normalizing only the final part would miss citations in
+        earlier parts; normalizing each part independently would produce
+        inconsistent numbering.  This method combines all text parts, runs
+        one ``normalize_citations_and_chunks`` pass, then distributes back,
+        returning the final part's text and the unified citation list.
+        """
+        text_entries: list[tuple[int, str]] = []
+        for i, part in enumerate(parts):
+            if part.get("type") == "text" and part.get("content"):
+                text_entries.append((i, part["content"]))
+
+        if not text_entries:
+            return "", []
+
+        if len(text_entries) == 1:
+            idx, content = text_entries[0]
+            normalized, citations = normalize_citations_and_chunks(
+                content, final_results, records,
+                ref_to_url=ref_to_url,
+                virtual_record_id_to_result=virtual_record_id_to_result,
+                web_records=web_records,
+            )
+            parts[idx]["content"] = normalized
+            return normalized, citations
+
+        delimiter = "\n\n\u00a7\u00a7PART_BOUNDARY\u00a7\u00a7\n\n"
+        combined = delimiter.join(content for _, content in text_entries)
+
+        normalized_combined, citations = normalize_citations_and_chunks(
+            combined, final_results, records,
+            ref_to_url=ref_to_url,
+            virtual_record_id_to_result=virtual_record_id_to_result,
+            web_records=web_records,
+        )
+
+        segments = normalized_combined.split(delimiter)
+        all_segments: list[str] = []
+        for seg_idx, (part_idx, _) in enumerate(text_entries):
+            if seg_idx < len(segments):
+                parts[part_idx]["content"] = segments[seg_idx]
+                parts[part_idx]["isFinal"] = True
+                all_segments.append(segments[seg_idx])
+
+        return "\n\n".join(all_segments), citations
+
     async def _run_success_path(
         self,
         state: dict[str, Any],
@@ -223,15 +281,44 @@ class AnswerFinalizer:
         ref_to_url = ref_mapper.ref_to_url if ref_mapper is not None else None
         prior_web_records = _extract_web_records_from_tool_results(tool_results, org_id)
 
-        normalized, citations, confidence = await finalize_agent_answer(
-            agent_output,
-            final_results,
-            self._collector.tool_records,
-            virtual_record_id_to_result=virtual_record_map,
-            ref_to_url=ref_to_url,
-            web_records=prior_web_records,
-            conversation_id=self._context.conversation_id,
-        )
+        clean_output, confidence = parse_confidence_from_answer(agent_output)
+
+        # Populate parts with confidence-stripped (not yet citation-normalized)
+        # text so ALL text parts still have their raw `[source](refN)` refs
+        # available for the unified normalization pass below.
+        completion_data: dict[str, Any] = {}
+        self._attach_parts(completion_data, final_text=clean_output)
+
+        parts = completion_data.get("parts")
+        if parts:
+            normalized, citations = self._normalize_all_parts_citations(
+                parts,
+                final_results,
+                self._collector.tool_records,
+                ref_to_url,
+                virtual_record_map,
+                prior_web_records,
+            )
+        else:
+            normalized, citations = normalize_citations_and_chunks(
+                clean_output, final_results, self._collector.tool_records,
+                ref_to_url=ref_to_url,
+                virtual_record_id_to_result=virtual_record_map,
+                web_records=prior_web_records,
+            )
+
+        if self._context.conversation_id:
+            from app.utils.conversation_tasks import await_and_collect_results  # noqa: PLC0415
+            from app.utils.streaming import _append_task_markers  # noqa: PLC0415
+
+            task_results = await await_and_collect_results(self._context.conversation_id)
+            if task_results:
+                normalized = _append_task_markers(normalized, task_results)
+                if parts:
+                    for part in reversed(parts):
+                        if part.get("type") == "text":
+                            part["content"] = normalized
+                            break
 
         # `TerminalAnswerStreamer` already streamed citations progressively,
         # but the finalized text differs (confidence stripped, task markers
@@ -246,16 +333,13 @@ class AnswerFinalizer:
         ):
             await event_sink.write(evt)
 
-        completion_data: dict[str, Any] = {
-            "answer": normalized,
-            "citations": citations,
-            "confidence": confidence,
-        }
+        completion_data["answer"] = normalized
+        completion_data["citations"] = citations
+        completion_data["confidence"] = confidence
         reasoning_payload = build_reasoning_payload(reasoning_turns)
         if reasoning_payload is not None:
             completion_data["reasoning"] = reasoning_payload
         completion_data.update(_tool_names_from_state(state))
-        self._attach_parts(completion_data, final_text=normalized)
         state["response"] = normalized
         state["completion_data"] = completion_data
         await self._emit_ask_user_question_fallback(state, event_sink)

@@ -39,7 +39,7 @@ from app.agents.agent_loop.clarification import emit_pre_run_clarification
 from app.agents.agent_loop.context import AgentContext
 from app.agents.agent_loop.error_classification import classify_error
 from app.agents.agent_loop.factory import PipesHubAgentFactory
-from app.agents.agent_loop.hooks import CitationCollector, eagerly_register_fetch_full_record
+from app.agents.agent_loop.hooks import CitationCollector, ensure_fetch_full_record_available
 from app.agents.agent_loop.respond import AnswerFinalizer
 from app.agents.agent_loop.stream_bridge import (
     QueueEventSink,
@@ -354,8 +354,8 @@ async def run_chat_stream(  # noqa: PLR0913 - mirrors run_agent_loop_stream's ca
                     "Relevant internal knowledge base context retrieved for this query "
                     f"(cite using the Citation IDs shown, e.g. [source](ref1)):\n{prefetch_result.formatted_context}"
                 )
-                eagerly_register_fetch_full_record(
-                    _runtime.tool_registry, CitationCollector(context), context,
+                ensure_fetch_full_record_available(
+                    context, registry=_runtime.tool_registry,
                 )
             if resolved_attachments.context_text:
                 goal.constraints.append(resolved_attachments.context_text)

@@ -14,10 +14,16 @@ requests.
 
 from app.agents.agent_loop.hooks.artifact_context import artifact_context_reminder
 from app.agents.agent_loop.hooks.ask_user_question import ask_user_question_sse
+from app.agents.agent_loop.hooks.attachment_resolver import (
+    attachment_rehydration,
+    resolve_attachments_for_goal,
+    resolve_history_attachments,
+    shape_image_injection,
+)
 from app.agents.agent_loop.hooks.citations import (
     CitationCollector,
     citation_tracking,
-    eagerly_register_fetch_full_record,
+    ensure_fetch_full_record_available,
 )
 from app.agents.agent_loop.hooks.completion_gate import (
     completion_gate,
@@ -40,14 +46,18 @@ __all__ = [
     "ToolErrorTracker",
     "artifact_context_reminder",
     "ask_user_question_sse",
+    "attachment_rehydration",
     "citation_tracking",
+    "ensure_fetch_full_record_available",
     "completion_gate",
     "conversation_enrichment",
-    "eagerly_register_fetch_full_record",
     "seed_visible_tools_from_history",
     "internal_search_attempted_tracking",
     "knowledge_first_gate",
     "looks_like_file_generation_request",
+    "resolve_attachments_for_goal",
+    "resolve_history_attachments",
+    "shape_image_injection",
     "result_accumulation",
     "retry_with_status",
     "stash_tool_call_metadata",

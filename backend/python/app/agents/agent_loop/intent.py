@@ -310,14 +310,12 @@ async def parse_intent_and_route(
 
     human_content: Any = f"user query : {user_query}"
     attachments = query_info.get("attachments") or []
-    if blob_store:
+    if blob_store and attachments:
         try:
-            attachment_blocks: list[dict] = []
-            if attachments and is_multimodal_llm:
-                attachment_blocks = await resolve_attachments(
-                    attachments=attachments, blob_store=blob_store, org_id=org_id,
-                    is_multimodal_llm=True, logger=logger,
-                )
+            attachment_blocks = await resolve_attachments(
+                attachments=attachments, blob_store=blob_store, org_id=org_id,
+                is_multimodal_llm=is_multimodal_llm, logger=logger,
+            )
             if attachment_blocks:
                 human_content = [
                     {"type": "text", "text": f"user query : {user_query}\n\nAttached files from the user:\n"},

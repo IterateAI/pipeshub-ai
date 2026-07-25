@@ -83,12 +83,7 @@ def _context_to_query_info(context: "AgentContext", query: str) -> dict[str, Any
         "filters": context.filters or {},
         "toolsets": context.agent_toolsets or [],
         "previous_conversations": context.previous_conversations,
-        # Attachments for the CURRENT turn aren't tracked on AgentContext
-        # (they're resolved once into the Goal by the route handler, not
-        # re-fetched here) -- routing on prior-turn attachments plus the
-        # query text is the same signal `_auto_select_graph` falls back to
-        # whenever `blob_store`/`attachments` are unavailable.
-        "attachments": [],
+        "attachments": context.tool_state.get("attachments") or [],
     }
 
 
@@ -121,7 +116,23 @@ def _build_loop(
     return ReActLoop()
 
 
-def _build_goal(raw_query: str, decision: IntentRouteDecision) -> Goal:
+def _base_constraints(
+    raw_query: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Seed constraints common to every Goal: the verbatim query + attachment names."""
+    constraints: list[str] = [f'Original user query: "{raw_query}"']
+    if attachments:
+        names = ", ".join(a.get("recordName", "unknown") for a in attachments)
+        constraints.append(f"User attached file(s): {names}")
+    return constraints
+
+
+def _build_goal(
+    raw_query: str,
+    decision: IntentRouteDecision,
+    attachments: list[dict[str, Any]] | None = None,
+) -> Goal:
     """Builds the structured `Goal` the agent actually runs with.
 
     `rewritten_query` becomes `description` (falling back to the raw query
@@ -146,7 +157,7 @@ def _build_goal(raw_query: str, decision: IntentRouteDecision) -> Goal:
         description=description,
         requirements=list(decision.requirements),
         success_criteria=list(decision.success_criteria),
-        constraints=[f'Original user query: "{raw_query}"'],
+        constraints=_base_constraints(raw_query, attachments),
         gaps=list(decision.gaps),
     )
 
@@ -216,6 +227,8 @@ async def select_loop_and_goal(
     """
     mode = resolve_mode(chat_mode)
 
+    attachments = context.tool_state.get("attachments") or []
+
     if mode is not None and mode.skip_intent:
         # `quick` today: the mode is already known from the wire value
         # (not the tier classifier), so there is no round-trip left to
@@ -228,7 +241,7 @@ async def select_loop_and_goal(
         # reached without paying for the call.
         goal = Goal(
             description=query,
-            constraints=[f'Original user query: "{query}"'],
+            constraints=_base_constraints(query, attachments),
         )
         clarifying_questions: list["AskUserQuestionItemInput"] = []
     else:
@@ -247,7 +260,7 @@ async def select_loop_and_goal(
             opik_active=opik_active,
             opik_project_name=opik_project_name,
         )
-        goal = _build_goal(query, decision)
+        goal = _build_goal(query, decision, attachments=attachments)
         clarifying_questions = list(decision.clarifying_questions)
 
         if mode is None:

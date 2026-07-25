@@ -66,6 +66,7 @@ _BEHAVIOR_RULES = """
 ## Behavior
 - For any information query: call matching tools on your FIRST turn. Do not ask which app to search — pick tools by matching the query to each tool's description.
 - When multiple tools could plausibly have the answer, call them IN PARALLEL.
+- **When the user uploads file(s)**: the attached content is your primary source. Analyze it directly to answer the question. Do NOT search connected services unless the user explicitly asks about a specific service or the attachment is clearly insufficient.
 - If a tool call returns an error, read the error message, adjust your approach, and retry once. If it fails again, tell the user what happened.
 - For follow-up queries, check conversation history for entity references (issue keys, page IDs, channel names) before asking the user to repeat them.
 {capability_question_rule}
@@ -455,16 +456,53 @@ as your **primary search surface** for any topic, information, or org-knowledge 
   description in the Available Tools section.
 - If multiple tools could plausibly contain the answer, call them **IN PARALLEL** in the same
   turn — the union gives the user the best result.
-
+{attachment_skip_note}
 ### Skip the search ONLY for:
 - Pure greetings or thanks ("hi", "thanks").
 - Simple arithmetic or date calculations.
 - User asking about their own identity / profile.
 - Write actions where you already have all required parameters.
+- Queries about user-uploaded attachments — analyze the attached content first; only search
+  services if the attachment alone cannot answer the question or the user explicitly asks for
+  cross-service information.
 
 If a search returns nothing useful, state that plainly and offer to broaden the query — do
 not retreat to ambiguity-clarification.
 """
+
+_ATTACHMENT_SKIP_NOTE = """
+### Attachment-first rule
+When the user has uploaded file(s) with their message, the attached content is your PRIMARY
+data source. Analyze it first. Do NOT proactively search connected services (Slack, Drive,
+Jira, Confluence, Gmail, etc.) unless the user explicitly mentions a service or the attached
+content is clearly insufficient for their question.
+"""
+
+
+def _build_attachment_context(attachments: list[dict[str, Any]] | None) -> str:
+    """Renders a concise prompt section listing user-uploaded attachments so
+    the agent knows what files are available and prioritizes them over
+    service-tool searching."""
+    if not attachments:
+        return ""
+    lines = [
+        "## User Attachments",
+        "",
+        "The user uploaded the following file(s) with this message. Their content "
+        "has been pre-processed and is available in the conversation context "
+        "(with citation IDs for referencing specific blocks). On follow-up turns "
+        "use `dynamic_fetch_full_record` to fetch specific records for citation.",
+        "",
+        "Treat attached content as your primary data source for this query.",
+        "",
+    ]
+    for att in attachments:
+        name = att.get("recordName", "unknown")
+        mime = att.get("mimeType", "")
+        ext = att.get("extension", "")
+        detail = f" ({mime})" if mime else (f" (.{ext})" if ext else "")
+        lines.append(f"- **{name}**{detail}")
+    return "\n".join(lines)
 
 
 class PipesHubPromptBuilder:
@@ -517,6 +555,10 @@ class PipesHubPromptBuilder:
         if goal is not None and goal.constraints:
             parts.append("## Additional Context\n" + "\n".join(f"- {c}" for c in goal.constraints))
 
+        attachment_ctx = _build_attachment_context(state.get("attachments"))
+        if attachment_ctx:
+            parts.append(attachment_ctx)
+
         tool_names = spec.tool_names or []
         if spec.tool_disclosure == "lazy" and runtime.tool_registry is not None:
             parts.append(self._build_lazy_tool_reference_section(tool_names, runtime))
@@ -536,7 +578,11 @@ class PipesHubPromptBuilder:
         if "internal_exploration_agent" in tool_names:
             parts.append(self._build_internal_knowledge_first_section(tool_names))
 
-        parts.append(self._build_hybrid_strategy_section(state, tool_names, has_web_search=has_web_search))
+        parts.append(self._build_hybrid_strategy_section(
+            state, tool_names,
+            has_web_search=has_web_search,
+            tool_disclosure=spec.tool_disclosure or "eager",
+        ))
 
 
         code_tool = _composed_code_tool(tool_names)
@@ -696,7 +742,8 @@ class PipesHubPromptBuilder:
 
     @staticmethod
     def _build_hybrid_strategy_section(
-        state: dict[str, Any], tool_names: list[str], *, has_web_search: bool,
+        state: dict[str, Any], tool_names: list[str], *,
+        has_web_search: bool, tool_disclosure: str = "eager",
     ) -> str:
         has_knowledge = bool(state.get("has_knowledge"))
         has_service_tools = any([
@@ -710,10 +757,14 @@ class PipesHubPromptBuilder:
             _has_clickup_tools(state),
         ])
 
+        has_attachments = bool(state.get("attachments"))
+
         if has_knowledge and has_service_tools:
             internal_ref = _internal_knowledge_reference(tool_names)
             web_ref = _web_reference(tool_names)
             section = _hybrid_strategy_header(internal_ref) + _hybrid_strategy_rules(internal_ref)
+            if has_attachments:
+                section += _ATTACHMENT_SKIP_NOTE
             if has_web_search:
                 section += _hybrid_web_search_note(web_ref)
             section += f"\n### How to merge hybrid results:\n1. Call the appropriate tools ({internal_ref} + service API"
@@ -734,7 +785,18 @@ class PipesHubPromptBuilder:
             return section
 
         if has_service_tools and not has_knowledge:
-            return _SERVICE_ONLY_STRATEGY
+            section = _SERVICE_ONLY_STRATEGY.format(
+                attachment_skip_note=_ATTACHMENT_SKIP_NOTE if has_attachments else "",
+            )
+            if tool_disclosure == "lazy":
+                section += (
+                    "\n### Tool discovery under lazy loading\n"
+                    "Service tools are grouped into toolsets that must be loaded before use. "
+                    "Use `search_tools(\"<what you need>\")` to find the right toolset for "
+                    "the query BEFORE calling `fetch_tools`. Do NOT load all toolsets at "
+                    "once — only load the one(s) relevant to the user's actual question.\n"
+                )
+            return section
 
         return ""
 

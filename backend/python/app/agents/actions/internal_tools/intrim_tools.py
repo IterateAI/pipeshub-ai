@@ -154,6 +154,7 @@ class AskUserQuestionInput(BaseModel):
         AuthBuilder.type("NONE").fields([])
     ])\
     .as_internal()\
+    .as_essential()\
     .configure(lambda builder: builder.with_icon("/assets/icons/toolsets/draft_mail.svg"))\
     .build_decorator()
 class InternalTools:

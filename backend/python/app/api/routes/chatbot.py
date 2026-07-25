@@ -1686,10 +1686,30 @@ async def _generate_chat_stream_via_agent_loop(
         "sendUserInfo": request.query_params.get("sendUserInfo", True),
     }
 
+    org_info: dict[str, Any] | None = None
+    try:
+        user_doc = await graph_provider.get_user_by_user_id(user_id) if user_id else None
+        if user_doc and isinstance(user_doc, dict):
+            for field in ("fullName", "firstName", "lastName", "displayName"):
+                if user_doc.get(field):
+                    user_info[field] = user_doc[field]
+        if org_id:
+            org_doc = await graph_provider.get_document(org_id, CollectionNames.ORGS.value)
+            if org_doc and isinstance(org_doc, dict):
+                raw_account_type = str(org_doc.get("accountType", "")).lower()
+                org_info = {
+                    "orgId": org_id,
+                    "accountType": raw_account_type if raw_account_type in ("enterprise", "individual") else "",
+                    "name": org_doc.get("name") or "",
+                }
+    except Exception:
+        logger_.debug("Failed to enrich user/org context for prompt", exc_info=True)
+
     async for event in run_chat_stream(
         query_dict, user_info, llm, policy, logger_,
         retrieval_service=retrieval_service, graph_provider=graph_provider,
         reranker_service=None, config_service=config_service,
+        org_info=org_info,
         model_name=query_info.modelName, model_key=query_info.modelKey,
         is_multimodal_llm=is_multimodal_llm, context_length=context_length,
         ai_models_config=ai_models_config, protocol=protocol,

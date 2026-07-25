@@ -68,7 +68,7 @@ _BEHAVIOR_RULES = """
 - When multiple tools could plausibly have the answer, call them IN PARALLEL.
 - **When the user uploads file(s)**: the attached content is your primary source. Analyze it directly to answer the question. Do NOT search connected services unless the user explicitly asks about a specific service or the attachment is clearly insufficient.
 - If a tool call returns an error, read the error message, adjust your approach, and retry once. If it fails again, tell the user what happened.
-- For follow-up queries, check conversation history for entity references (issue keys, page IDs, channel names) before asking the user to repeat them.
+- **Follow-up resolution**: before acting on any query, mentally rewrite it into a self-contained request by resolving references, pronouns, and omitted context from the conversation history. Act on that resolved interpretation, not the raw text. If the conversation history makes the referent clear, never ask the user to repeat it.
 {capability_question_rule}
 ## Response Format
 - Answer directly — never narrate your process ("I searched for…", "The tool returned…").
@@ -240,12 +240,23 @@ def _hybrid_web_search_note(web_ref: str) -> str:
 # `tool_system.py::_UI_ONLY_INTERNAL_TOOLS` / `hooks/ask_user_question.py`) —
 # only present in `spec.tool_names` when there's a UI client to answer it,
 # so the ambiguity-confirmation bullet below must only be offered then.
-_ASK_USER_QUESTION_TOOL_NAME = "internaltools_ask_user_question"
+_ASK_USER_QUESTION_TOOL_NAME = "internaltools__ask_user_question"
 
 # Dynamically granted by `hooks/citations.py::citation_tracking` onto THIS
 # agent's own `spec.tool_names` the first time `internal_exploration_agent`
 # (running as a child) returns search results — never present on turn 1.
 _FETCH_FULL_RECORD_TOOL_NAME = "dynamic_fetch_full_record"
+
+_INTENT_RESOLUTION = """
+## Intent Resolution
+
+Resolve the user's intent from their message and conversation history before
+acting. When the intent is clear, execute. When information needed for an
+action is missing, look it up with available tools before asking the user —
+prefer offering concrete choices over open-ended questions. When intent is
+genuinely ambiguous and cannot be narrowed from context, clarify with the
+user before acting.
+"""
 
 _FULL_RECORD_FOLLOW_UP_NOTE = """
 You now also have direct access to `dynamic_fetch_full_record` (it became
@@ -565,6 +576,8 @@ class PipesHubPromptBuilder:
         else:
             parts.append(self._build_tool_reference_section(tool_names, runtime))
 
+        parts.append(_INTENT_RESOLUTION)
+
         has_retrieval = bool(state.get("final_results"))
         has_attachments = bool(state.get("attachments"))
         has_web_search = bool(state.get("web_search_config"))
@@ -583,7 +596,6 @@ class PipesHubPromptBuilder:
             has_web_search=has_web_search,
             tool_disclosure=spec.tool_disclosure or "eager",
         ))
-
 
         code_tool = _composed_code_tool(tool_names)
         sandbox_networked = code_tool is not None and sandbox_network_enabled()

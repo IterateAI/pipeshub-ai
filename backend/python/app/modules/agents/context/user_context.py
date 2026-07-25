@@ -33,6 +33,8 @@ def _format_user_context(state: ChatState) -> str:
     if user_email:
         parts.append(f"- **Email**: {user_email}")
 
+    if org_info.get("name"):
+        parts.append(f"- **Organization**: {org_info['name']}")
     if org_info.get("accountType"):
         parts.append(f"- **Account Type**: {org_info['accountType']}")
 

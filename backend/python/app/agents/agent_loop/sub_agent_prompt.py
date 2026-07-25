@@ -103,6 +103,8 @@ def build_user_context_block(context: "AgentContext") -> str:
         or user_info.get("displayName")
         or f"{user_info.get('firstName', '')} {user_info.get('lastName', '')}".strip()
     )
+    org_info = context.org_info or {}
+    org_name = org_info.get("name") or ""
     if not name and not email:
         return ""
     lines = ["## Current User"]
@@ -110,6 +112,8 @@ def build_user_context_block(context: "AgentContext") -> str:
         lines.append(f"- Name: {name}")
     if email:
         lines.append(f"- Email: {email}")
+    if org_name:
+        lines.append(f"- Organization: {org_name}")
     lines.append('When the query says "my", "me", or "I", it refers to this user.')
     return "\n".join(lines)
 

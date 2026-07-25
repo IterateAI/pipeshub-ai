@@ -505,7 +505,7 @@ class TestInternalKnowledgeFirstSection:
         context = make_context()
         result = _build(
             context,
-            tool_names=["internal_exploration_agent", "web_agent", "internaltools_ask_user_question"],
+            tool_names=["internal_exploration_agent", "web_agent", "internaltools__ask_user_question"],
         )
         section = result.split("## Internal Knowledge First", 1)[1]
         assert "ask_user_question" in section
@@ -535,3 +535,62 @@ class TestInternalKnowledgeFirstSection:
         section = result.split("## Internal Knowledge First", 1)[1]
         assert "dynamic_fetch_full_record" in section
         assert "re-delegating" in section
+
+
+class TestFollowUpResolution:
+    """Verify that the behavior rules instruct the model to resolve
+    follow-up references from conversation history."""
+
+    def test_follow_up_resolution_guidance_always_present(self) -> None:
+        context = make_context()
+        result = _build(context)
+        assert "Follow-up resolution" in result
+
+    def test_self_contained_rewrite_instruction(self) -> None:
+        context = make_context()
+        result = _build(context)
+        assert "self-contained request" in result
+
+    def test_resolve_from_conversation_history(self) -> None:
+        context = make_context()
+        result = _build(context)
+        assert "conversation history" in result
+
+    def test_never_ask_for_resolvable_reference(self) -> None:
+        context = make_context()
+        result = _build(context)
+        assert "never ask the user to repeat it" in result
+
+
+class TestIntentResolution:
+    """Verify that the single intent resolution section renders for all agents
+    unconditionally — no tool-gated variants."""
+
+    _SECTION_HEADING = "## Intent Resolution"
+
+    def test_present_with_no_tools(self) -> None:
+        context = make_context()
+        result = _build(context, tool_names=[])
+        assert self._SECTION_HEADING in result
+        assert "clarify with the" in result
+
+    def test_present_with_ask_user_tool(self) -> None:
+        context = make_context()
+        result = _build(context, tool_names=["internaltools__ask_user_question"])
+        assert self._SECTION_HEADING in result
+        assert "clarify with the" in result
+
+    def test_present_without_ask_user_tool(self) -> None:
+        context = make_context()
+        result = _build(context, tool_names=["web_search", "fetch_url"])
+        assert self._SECTION_HEADING in result
+        assert "clarify with the" in result
+
+    def test_same_prompt_regardless_of_tools(self) -> None:
+        """The intent section must be identical no matter which tools are granted."""
+        context = make_context()
+        with_tool = _build(context, tool_names=["internaltools__ask_user_question"])
+        without_tool = _build(context, tool_names=["web_search"])
+        section_with = with_tool.split(self._SECTION_HEADING, 1)[1].split("\n## ", 1)[0]
+        section_without = without_tool.split(self._SECTION_HEADING, 1)[1].split("\n## ", 1)[0]
+        assert section_with == section_without

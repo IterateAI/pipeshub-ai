@@ -330,7 +330,8 @@ async def _get_org_info(user_info: dict[str, Any], graph_provider: IGraphDBProvi
 
         return {
             "orgId": user_info["orgId"],
-            "accountType": raw_account_type
+            "accountType": raw_account_type,
+            "name": org_doc.get("name") or "",
         }
     except HTTPException:
         raise

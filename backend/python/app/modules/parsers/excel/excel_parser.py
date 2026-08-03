@@ -366,6 +366,20 @@ class ExcelParser:
         record_name: str,
         config: dict[str, Any] | None = None,
     ) -> ParseResult:
+            if config and config.get("skip_table_enrichment"):
+                await asyncio.to_thread(self.load_workbook_from_binary, content)
+                try:
+                    blocks_containers = await asyncio.to_thread(
+                        self._build_basic_block_container
+                    )
+                finally:
+                    if self.workbook:
+                        self.workbook.close()
+                return ParseResult(
+                    block_container=blocks_containers,
+                    metadata={"record_name": record_name},
+                )
+
             llm, _ = await get_llm_for_role(self.config_service, "indexing")
             # openpyxl's load is synchronous and can take seconds on large
             # workbooks; keep it off the event loop.
@@ -498,6 +512,7 @@ class ExcelParser:
                         format=DataFormat.JSON,
                         data={
                             "row_natural_language_text": generate_simple_row_text(row_data),
+                            "row_values": list(row_data.values()),
                             "row_number": int(row_num),
                             "row_end_number": int(row_num),
                             "row_count": 1,
@@ -1577,4 +1592,3 @@ Respond with ONLY a JSON object with EXACTLY {column_count} headers:
 
         self.logger.info(f"Workbook processing complete. Total: {len(blocks)} blocks, {len(block_groups)} block groups")
         return BlocksContainer(blocks=blocks, block_groups=block_groups)
-

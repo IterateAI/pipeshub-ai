@@ -722,6 +722,7 @@ def get_generator_model(provider: str, config: dict[str, Any], model_name: str |
         return ChatOpenAI(
                 model=model_name,
                 temperature=temperature,
+                max_tokens=configuration.get("maxTokens") or MAX_OUTPUT_TOKENS,
                 timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
                 organization=configuration.get("organizationId"),
@@ -756,6 +757,7 @@ def get_generator_model(provider: str, config: dict[str, Any], model_name: str |
         return ChatOpenAI(
                 model=model_name,
                 temperature=temperature,
+                max_tokens=configuration.get("maxTokens") or MAX_OUTPUT_TOKENS,
                 timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
                 base_url=configuration["endpoint"],

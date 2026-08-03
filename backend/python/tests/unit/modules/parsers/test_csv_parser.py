@@ -1,7 +1,7 @@
 """Unit tests for app.modules.parsers.csv.csv_parser.CSVParser."""
 
 import io
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -254,6 +254,28 @@ class TestReadRawRows:
         assert isinstance(result, list)
         for row in result:
             assert isinstance(row, list)
+
+
+@pytest.mark.asyncio
+async def test_parse_skip_table_enrichment_is_deterministic(parser):
+    content = b"region,revenue\nNorth,120\nSouth,95\n"
+
+    with patch(
+        "app.modules.parsers.csv.csv_parser.get_llm_for_role",
+        new_callable=AsyncMock,
+    ) as get_llm:
+        result = await parser.parse(
+            content,
+            "sales.csv",
+            {"skip_table_enrichment": True},
+        )
+
+    get_llm.assert_not_awaited()
+    assert len(result.block_container.blocks) == 2
+    assert result.block_container.blocks[0].data["row_number"] == 2
+    assert "region: North" in result.block_container.blocks[0].data[
+        "row_natural_language_text"
+    ]
 
 
 # ---------------------------------------------------------------------------

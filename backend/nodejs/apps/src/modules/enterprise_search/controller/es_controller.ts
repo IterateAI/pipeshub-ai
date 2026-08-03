@@ -592,10 +592,38 @@ const SUPPORTED_CHAT_ATTACHMENT_MIMETYPES = new Set([
   'image/jpg',
   'image/png',
   'application/pdf',
+  'application/csv',
+  'text/csv',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'text/plain',
   'text/markdown',
   'text/mdx',
 ]);
+
+const SUPPORTED_CHAT_ATTACHMENT_EXTENSIONS = new Set([
+  'pdf',
+  'jpg',
+  'jpeg',
+  'png',
+  'txt',
+  'md',
+  'mdx',
+  'csv',
+  'xls',
+  'xlsx',
+  'ppt',
+  'pptx',
+]);
+
+const isSupportedChatAttachment = (file: Express.Multer.File): boolean => {
+  const mimeType = (file.mimetype || '').toLowerCase();
+  const extension = file.originalname.split('.').pop()?.toLowerCase() || '';
+  return SUPPORTED_CHAT_ATTACHMENT_MIMETYPES.has(mimeType)
+    || SUPPORTED_CHAT_ATTACHMENT_EXTENSIONS.has(extension);
+};
 
 export const uploadChatAttachments =
   (appConfig: AppConfig) =>
@@ -607,11 +635,11 @@ export const uploadChatAttachments =
       }
 
       const invalidFile = files.find(
-        (file) => !SUPPORTED_CHAT_ATTACHMENT_MIMETYPES.has((file.mimetype || '').toLowerCase()),
+        (file) => !isSupportedChatAttachment(file),
       );
       if (invalidFile) {
         throw new BadRequestError(
-          `Unsupported attachment type: ${invalidFile.originalname}. Supported types: PDF, JPEG, PNG, TXT, MD, MDX.`,
+          `Unsupported attachment type: ${invalidFile.originalname}. Supported types: PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX.`,
         );
       }
 

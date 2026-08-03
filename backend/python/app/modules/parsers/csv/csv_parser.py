@@ -85,7 +85,12 @@ class CSVParser:
         record_name: str,
         config: dict[str, Any] | None = None,
     ) -> ParseResult:
-            llm, _ = await get_llm_for_role(self.config_service, "indexing")
+            skip_table_enrichment = bool(
+                config and config.get("skip_table_enrichment")
+            )
+            llm = None
+            if not skip_table_enrichment:
+                llm, _ = await get_llm_for_role(self.config_service, "indexing")
 
             # Try different encodings to decode binary data
             encodings = ["utf-8", "latin1", "cp1252", "iso-8859-1"]
@@ -793,7 +798,7 @@ class CSVParser:
     async def get_blocks_from_csv_with_multiple_tables(
         self,
         tables: List[Dict[str, Any]],
-        llm: BaseChatModel
+        llm: BaseChatModel | None,
     ) -> BlocksContainer:
         """
         Process multiple tables from CSV and create BlocksContainer.
@@ -821,20 +826,50 @@ class CSVParser:
             if not raw_rows:
                 continue
 
-            # Prepare rows for header detection (first N rows)
-            detection_rows = raw_rows[:MAX_HEADER_DETECTION_ROWS]
+            if llm is None:
+                raw_headers = raw_rows[0]
+                headers = self._deduplicate_headers(
+                    [
+                        str(value).strip()
+                        if value and value != "null"
+                        else f"Column_{idx + 1}"
+                        for idx, value in enumerate(raw_headers)
+                    ]
+                )
+                csv_result = []
+                line_numbers = []
+                for row_idx, row in enumerate(raw_rows[1:]):
+                    padded_row = row + ["null"] * max(0, len(headers) - len(row))
+                    values = padded_row[:len(headers)]
+                    cleaned_row = {
+                        headers[idx]: (
+                            None if value == "null" else self._parse_value(value)
+                        )
+                        for idx, value in enumerate(values)
+                    }
+                    if not all(value is None for value in cleaned_row.values()):
+                        csv_result.append(cleaned_row)
+                        line_numbers.append(table["start_row"] + row_idx + 1)
+            else:
+                # Prepare rows for header detection (first N rows)
+                detection_rows = raw_rows[:MAX_HEADER_DETECTION_ROWS]
 
-            # Detect headers using LLM
-            detection = await self.detect_headers_with_llm(detection_rows, llm)
-            logger.info(f"Table {table_idx + 1}: has_headers={detection.has_headers}, num_header_rows={detection.num_header_rows}")
+                # Detect headers using LLM
+                detection = await self.detect_headers_with_llm(detection_rows, llm)
+                logger.info(
+                    "Table %s: has_headers=%s, num_header_rows=%s",
+                    table_idx + 1,
+                    detection.has_headers,
+                    detection.num_header_rows,
+                )
 
-            # Unified processing path - handles all three scenarios
-            csv_result, line_numbers = await self.process_table_with_header_info(
-                raw_rows,
-                detection,
-                table["start_row"],
-                llm
-            )
+                # Unified processing path - handles all three scenarios
+                csv_result, line_numbers = await self.process_table_with_header_info(
+                    raw_rows,
+                    detection,
+                    table["start_row"],
+                    llm,
+                )
 
             if not csv_result:
                 continue
@@ -844,10 +879,13 @@ class CSVParser:
             cumulative_row_count += table_row_count
 
             # Check if cumulative count exceeds threshold
-            use_llm_for_rows = cumulative_row_count <= threshold
+            use_llm_for_rows = llm is not None and cumulative_row_count <= threshold
 
-            # Get table summary (always use LLM)
-            table_summary = await self.get_table_summary(llm, csv_result)
+            table_summary = (
+                await self.get_table_summary(llm, csv_result)
+                if llm is not None
+                else ""
+            )
 
             # Create table BlockGroup
             table_group_index = len(block_groups)
@@ -912,6 +950,7 @@ class CSVParser:
                             format=DataFormat.JSON,
                             data={
                                 "row_natural_language_text": row_text,
+                                "row_values": list(row.values()),
                                 "row_number": actual_row_number,
                             },
                             parent_index=table_group_index,
@@ -942,5 +981,3 @@ class CSVParser:
             block_groups.append(table_group)
 
         return BlocksContainer(blocks=blocks, block_groups=block_groups)
-
-

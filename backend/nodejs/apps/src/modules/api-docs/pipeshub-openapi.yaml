@@ -23229,8 +23229,9 @@ paths:
         - Conversations
       summary: Upload chat attachments (assistant)
       description: |
-        Multipart upload of **PDF**, **JPEG**, or **PNG** files for the assistant chat UI.
-        The gateway validates MIME types (only those three), then forwards a JSON payload to the
+        Multipart upload of **PDF**, **JPEG**, **PNG**, **TXT**, **MD**, **CSV**, **XLS/XLSX**,
+        or **PPT/PPTX** files for the assistant chat UI.
+        The gateway validates MIME types and recognized extensions, then forwards a JSON payload to the
         query service at `POST /api/v1/chat/attachments/upload`. **Multer** enforces at most **10**
         files and **5 MiB** per file (oversized requests fail before the handler runs).
 
@@ -27672,8 +27673,9 @@ paths:
         - Agents
       summary: Upload agent chat attachments
       description: |
-        Multipart upload of PDF, JPEG, or PNG files for agent chat. Same limits as assistant
-        chat (`POST /conversations/attachments/upload`): up to 10 files, 5 MiB each. Proxies to
+        Multipart upload of PDF, JPEG, PNG, TXT, MD, CSV, XLS, XLSX, PPT, or PPTX files
+        for agent chat. Same limits as assistant chat (`POST /conversations/attachments/upload`):
+        up to 10 files, 5 MiB each. Proxies to
         the AI backend. Optional `conversationId` associates uploads with an existing agent thread.
       operationId: uploadAgentConversationChatAttachments
       x-pipeshub-sdk: true

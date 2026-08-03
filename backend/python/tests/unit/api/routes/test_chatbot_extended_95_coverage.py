@@ -42,6 +42,20 @@ class TestAttachmentMimeHelpers:
         assert _is_supported_attachment_mime("text/plain") is True
         assert _is_supported_attachment_mime("text/markdown") is True
         assert _is_supported_attachment_mime("text/mdx") is True
+        assert _is_supported_attachment_mime("text/csv") is True
+        assert _is_supported_attachment_mime(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ) is True
+        assert _is_supported_attachment_mime(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        ) is True
+
+    def test_supported_extension_fallback(self):
+        from app.api.routes.chatbot import _is_supported_attachment
+
+        assert _is_supported_attachment("report.xlsx", "application/octet-stream") is True
+        assert _is_supported_attachment("slides.pptx", "") is True
+        assert _is_supported_attachment("archive.zip", "application/octet-stream") is False
 
     def test_text_attachment_detection(self):
         from app.api.routes.chatbot import _is_text_attachment
@@ -70,7 +84,70 @@ class TestAttachmentMimeHelpers:
         assert _attachment_extension("x", "text/plain") == "txt"
         assert _attachment_extension("x", "text/markdown") == "md"
         assert _attachment_extension("x", "text/mdx") == "mdx"
+        assert _attachment_extension("x", "text/csv") == "csv"
+        assert _attachment_extension(
+            "x", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ) == "xlsx"
+        assert _attachment_extension(
+            "x", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        ) == "pptx"
         assert _attachment_extension("plain", "application/octet-stream") == "bin"
+
+
+def test_structured_attachment_citation_provenance():
+    from app.api.routes.chatbot import _add_structured_attachment_citations
+    from app.models.blocks import (
+        Block,
+        BlockGroup,
+        BlocksContainer,
+        BlockType,
+        CitationMetadata,
+        DataFormat,
+        GroupType,
+        TableMetadata,
+    )
+
+    workbook = BlocksContainer(
+        blocks=[
+            Block(
+                index=0,
+                type=BlockType.TABLE_ROW,
+                format=DataFormat.JSON,
+                data={"row_number": 7, "sheet_number": 2, "sheet_name": "Revenue"},
+                parent_index=0,
+            )
+        ],
+        block_groups=[
+            BlockGroup(
+                index=0,
+                type=GroupType.TABLE,
+                format=DataFormat.JSON,
+                table_metadata=TableMetadata(num_of_cols=28),
+            )
+        ],
+    )
+    _add_structured_attachment_citations(workbook, "xlsx")
+    citation = workbook.blocks[0].citation_metadata
+    assert citation is not None
+    assert citation.sheet_name == "Revenue"
+    assert citation.sheet_number == 2
+    assert citation.row_number == 7
+    assert citation.cell_reference == "A7:AB7"
+
+    slides = BlocksContainer(
+        blocks=[
+            Block(
+                index=0,
+                type=BlockType.TEXT,
+                format=DataFormat.TXT,
+                data="Summary",
+                citation_metadata=CitationMetadata(page_number=3),
+            )
+        ],
+        block_groups=[],
+    )
+    _add_structured_attachment_citations(slides, "pptx")
+    assert slides.blocks[0].citation_metadata.slide_number == 3
 
 
 @pytest.mark.parametrize("mime,expected_subtype", [
@@ -885,6 +962,154 @@ async def test_upload_png_happy_mocked_sink():
     assert out["conversationId"] == "conv-z"
     assert len(out["attachments"]) == 1
     orch.index.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upload_xlsx_uses_parsing_service_and_preserves_provenance():
+    import base64
+
+    from app.api.routes.chatbot import upload_chat_attachments
+    from app.models.blocks import (
+        Block,
+        BlockGroup,
+        BlocksContainer,
+        BlockType,
+        DataFormat,
+        GroupType,
+        TableMetadata,
+    )
+    from app.services.parsing.interface import ParseResult, ParserProvider
+
+    req = MagicMock()
+    req.json = AsyncMock(
+        return_value={
+            "conversationId": "conv-xlsx",
+            "attachments": [
+                {
+                    "fileName": "revenue.xlsx",
+                    "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "size": 16,
+                    "contentBase64": base64.b64encode(b"fake workbook").decode("ascii"),
+                }
+            ],
+        }
+    )
+    req.state.user = {"orgId": "org-x", "userId": "u-x", "isServiceAccount": False}
+    req.app.container.logger.return_value = MagicMock()
+
+    gp = AsyncMock()
+    gp.get_user_by_user_id = AsyncMock(return_value={"_key": "gk"})
+    gp.batch_upsert_nodes = AsyncMock()
+    gp.batch_create_edges = AsyncMock()
+
+    parsed = BlocksContainer(
+        blocks=[
+            Block(
+                index=0,
+                type=BlockType.TABLE_ROW,
+                format=DataFormat.JSON,
+                data={"row_number": 4, "sheet_number": 1, "sheet_name": "Revenue"},
+                parent_index=0,
+            )
+        ],
+        block_groups=[
+            BlockGroup(
+                index=0,
+                type=GroupType.TABLE,
+                format=DataFormat.JSON,
+                table_metadata=TableMetadata(num_of_cols=3),
+            )
+        ],
+    )
+    parsing_client = AsyncMock()
+    parsing_client.parse = AsyncMock(
+        return_value=ParseResult(
+            block_container=parsed,
+            provider_used=ParserProvider.DEFAULT,
+        )
+    )
+
+    fake_record = MagicMock()
+    with (
+        patch("app.api.routes.chatbot.BlobStorage") as blob_storage_class,
+        patch("app.api.routes.chatbot.GraphDBTransformer", return_value=MagicMock()),
+        patch("app.api.routes.chatbot.SinkOrchestrator") as sink_class,
+        patch(
+            "app.api.routes.chatbot.convert_record_dict_to_record",
+            return_value=fake_record,
+        ),
+        patch(
+            "app.api.routes.chatbot.TransformContext",
+            MagicMock(side_effect=lambda **_: MagicMock()),
+        ),
+    ):
+        blob_storage_class.return_value.save_binary_to_storage = AsyncMock(
+            return_value=("external-id", None)
+        )
+        sink_class.return_value.index = AsyncMock()
+        out = await upload_chat_attachments(
+            req,
+            gp,
+            AsyncMock(),
+            parsing_client,
+        )
+
+    parsing_client.parse.assert_awaited_once()
+    call_kwargs = parsing_client.parse.await_args.kwargs
+    assert call_kwargs["extension"] == "xlsx"
+    assert call_kwargs["provider"] == ParserProvider.DEFAULT
+    citation = fake_record.block_containers.blocks[0].citation_metadata
+    assert citation.sheet_name == "Revenue"
+    assert citation.row_number == 4
+    assert citation.cell_reference == "A4:C4"
+    assert out["attachments"][0]["ocrMode"] == "parser_service:default"
+
+
+def test_structured_record_renderer_compacts_csv_rows_with_citations():
+    from app.api.routes.chatbot import _structured_record_to_message_content
+    from app.utils.chat_helpers import CitationRefMapper
+
+    record = {
+        "id": "record-1",
+        "record_name": "sales.csv",
+        "frontend_url": "https://example.test",
+        "block_containers": {
+            "block_groups": [
+                {
+                    "index": 0,
+                    "data": {"column_headers": ["transaction_id", "net_revenue"]},
+                }
+            ],
+            "blocks": [
+                {
+                    "index": 0,
+                    "parent_index": 0,
+                    "type": "table_row",
+                    "data": {
+                        "row_natural_language_text": (
+                            "transaction_id: TX-01427, net_revenue: 988.0"
+                        ),
+                        "row_values": ["TX-01427", 988.0],
+                        "row_number": 1428,
+                    },
+                    "citation_metadata": {"row_number": 1428},
+                }
+            ],
+        },
+    }
+
+    parts = _structured_record_to_message_content(
+        record,
+        "csv",
+        CitationRefMapper(),
+    )
+
+    assert len(parts) == 1
+    rendered = parts[0]["text"]
+    assert "Columns: transaction_id | net_revenue" in rendered
+    assert "CSV row 1428: TX-01427 | 988.0" in rendered
+    assert "transaction_id: TX-01427" not in rendered
+    assert "[ref1]" in rendered
 
 
 @pytest.mark.asyncio

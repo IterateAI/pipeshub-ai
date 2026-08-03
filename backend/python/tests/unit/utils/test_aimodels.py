@@ -445,6 +445,7 @@ class TestGetGeneratorModel:
         mock_cls.assert_called_once()
         call_kwargs = mock_cls.call_args.kwargs
         assert call_kwargs["stream_usage"] is True
+        assert call_kwargs["max_tokens"] == 4096
         assert result is mock_cls.return_value
 
     @patch("langchain_openai.ChatOpenAI")
@@ -486,7 +487,28 @@ class TestGetGeneratorModel:
         config = self._base_config()
         result = get_generator_model(LLMProvider.OPENAI_COMPATIBLE.value, config)
         mock_cls.assert_called_once()
+        assert mock_cls.call_args.kwargs["max_tokens"] == 4096
         assert result is mock_cls.return_value
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_openai_compatible_honors_configured_max_tokens(self, mock_cls):
+        mock_cls.return_value = MagicMock()
+        config = self._base_config()
+        config["configuration"]["maxTokens"] = 2048
+
+        get_generator_model(LLMProvider.OPENAI_COMPATIBLE.value, config)
+
+        assert mock_cls.call_args.kwargs["max_tokens"] == 2048
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_openai_compatible_defaults_null_max_tokens(self, mock_cls):
+        mock_cls.return_value = MagicMock()
+        config = self._base_config()
+        config["configuration"]["maxTokens"] = None
+
+        get_generator_model(LLMProvider.OPENAI_COMPATIBLE.value, config)
+
+        assert mock_cls.call_args.kwargs["max_tokens"] == MAX_OUTPUT_TOKENS
 
     @patch("langchain_openai.ChatOpenAI")
     def test_minimax(self, mock_cls):

@@ -41,11 +41,15 @@ from app.modules.transformers.blob_storage import BlobStorage
 from app.modules.transformers.graphdb import GraphDBTransformer
 from app.modules.transformers.sink_orchestrator import SinkOrchestrator
 from app.modules.transformers.transformer import TransformContext
+from app.services.base_client import ServiceCallError
 from app.services.graph_db.interface.graph_db_provider import IGraphDBProvider
+from app.services.parsing.client import ParsingClient, ParsingClientError
+from app.services.parsing.interface import ParserProvider
 from app.utils.aimodels import get_generator_model_async
 from app.utils.cache_helpers import get_cached_user_info
 from app.utils.chat_helpers import (
     CitationRefMapper,
+    build_block_web_url,
     build_message_content_array,
     context_includes_jira_tickets,
     enrich_virtual_record_id_to_result_with_fk_children,
@@ -282,6 +286,10 @@ async def get_config_service(request: Request) -> ConfigurationService:
     return container.config_service()
 
 
+async def get_parsing_client() -> ParsingClient:
+    return ParsingClient()
+
+
 async def _build_llm_user_context_string(
     graph_provider: IGraphDBProvider,
     user_id: str,
@@ -378,6 +386,93 @@ def _collapse_single_text_user_content(parts: list[dict[str, Any]]) -> str | lis
     return parts
 
 
+def _structured_record_to_message_content(
+    record: dict[str, Any],
+    extension: str,
+    ref_mapper: CitationRefMapper,
+) -> list[dict[str, Any]]:
+    """Render structured attachments compactly while retaining source citations."""
+    block_container = record.get("block_containers") or {}
+    blocks = block_container.get("blocks") or []
+    block_groups = block_container.get("block_groups") or []
+    groups_by_index = {
+        group.get("index"): group
+        for group in block_groups
+        if isinstance(group, dict)
+    }
+    record_id = str(record.get("id") or "")
+    frontend_url = str(record.get("frontend_url") or "")
+    record_name = str(record.get("record_name") or "structured attachment")
+    normalized_extension = extension.lower().lstrip(".")
+    lines = [f"<record name={record_name!r} format={normalized_extension!r}>"]
+    rendered_group_headers: set[int] = set()
+
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("parent_block_index") is not None:
+            continue
+        block_index = int(block.get("index") or 0)
+        data = block.get("data")
+        citation = block.get("citation_metadata") or {}
+        parent_index = block.get("parent_index")
+        group = groups_by_index.get(parent_index) or {}
+        group_data = group.get("data") or {}
+
+        if parent_index is not None and parent_index not in rendered_group_headers:
+            headers = group_data.get("column_headers") or []
+            if headers:
+                sheet_name = group_data.get("sheet_name")
+                prefix = f"Sheet {sheet_name}: " if sheet_name else ""
+                lines.append(prefix + "Columns: " + " | ".join(map(str, headers)))
+            rendered_group_headers.add(parent_index)
+
+        location_parts: list[str] = []
+        if normalized_extension == "csv":
+            row_number = citation.get("row_number") or (
+                data.get("row_number") if isinstance(data, dict) else None
+            )
+            if row_number is not None:
+                location_parts.append(f"CSV row {row_number}")
+        elif normalized_extension in {"xls", "xlsx"}:
+            sheet_name = citation.get("sheet_name") or (
+                data.get("sheet_name") if isinstance(data, dict) else None
+            )
+            cell_reference = citation.get("cell_reference")
+            row_number = citation.get("row_number") or (
+                data.get("row_number") if isinstance(data, dict) else None
+            )
+            if sheet_name:
+                location_parts.append(f"sheet {sheet_name}")
+            if cell_reference:
+                location_parts.append(str(cell_reference))
+            elif row_number is not None:
+                location_parts.append(f"row {row_number}")
+        elif normalized_extension in {"ppt", "pptx"}:
+            slide_number = citation.get("slide_number") or citation.get("page_number")
+            if slide_number is not None:
+                location_parts.append(f"slide {slide_number}")
+
+        if isinstance(data, dict):
+            row_values = data.get("row_values")
+            if isinstance(row_values, list):
+                rendered_data = " | ".join(
+                    "" if value is None else str(value) for value in row_values
+                )
+            else:
+                rendered_data = str(data.get("row_natural_language_text") or data)
+        else:
+            rendered_data = str(data or "")
+        if not rendered_data:
+            continue
+
+        block_url = build_block_web_url(frontend_url, record_id, block_index)
+        citation_ref = ref_mapper.get_or_create_ref(block_url)
+        location = ", ".join(location_parts) or f"block {block_index}"
+        lines.append(f"- [{citation_ref}] {location}: {rendered_data}")
+
+    lines.append("</record>")
+    return [{"type": "text", "text": "\n".join(lines)}]
+
+
 async def _append_conversation_history(
     messages: list[dict[str, Any]],
     previous_conversations: list[dict],
@@ -424,8 +519,7 @@ async def _append_conversation_history(
                 attachments = [
                     att
                     for att in attachments
-                    if isinstance(att, dict)
-                    and (att.get("mimeType") or "").lower() in _DOC_ATTACHMENT_MIME_TYPES
+                    if isinstance(att, dict) and _is_document_attachment_ref(att)
                 ]
                 for att in attachments:
                     vrid = att.get("virtualRecordId") or ""
@@ -612,8 +706,7 @@ async def _build_attachment_llm_messages(
 
     attachments = [
         att for att in query_info.attachments
-        if isinstance(att, dict)
-        and (att.get("mimeType") or "").lower() in _DOC_ATTACHMENT_MIME_TYPES
+        if isinstance(att, dict) and _is_document_attachment_ref(att)
     ]
     content_blocks: list[dict[str, Any]] = []
     if attachments and blob_store and org_id:
@@ -626,9 +719,19 @@ async def _build_attachment_llm_messages(
                 if not record:
                     continue
                 virtual_record_id_to_result[vrid] = record
-                record_blocks, ref_mapper = record_to_message_content(
-                    record, ref_mapper=ref_mapper, is_multimodal_llm=is_multimodal_llm
-                )
+                extension = str(att.get("extension") or "").lower().lstrip(".")
+                if extension in _STRUCTURED_ATTACHMENT_EXTENSIONS:
+                    record_blocks = _structured_record_to_message_content(
+                        record,
+                        extension,
+                        ref_mapper,
+                    )
+                else:
+                    record_blocks, ref_mapper = record_to_message_content(
+                        record,
+                        ref_mapper=ref_mapper,
+                        is_multimodal_llm=is_multimodal_llm,
+                    )
                 content_blocks.extend(record_blocks)
             except Exception as exc:
                 logger.warning("Failed to resolve attachment vrid=%s: %s", vrid, exc)
@@ -1153,6 +1256,12 @@ async def _generate_web_search_stream(
 
 _SUPPORTED_ATTACHMENT_MIME_TYPES = {
     "application/pdf",
+    "application/csv",
+    "text/csv",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "image/jpeg",
     "image/jpg",
     "image/png",
@@ -1162,11 +1271,44 @@ _SUPPORTED_ATTACHMENT_MIME_TYPES = {
 }
 
 _TEXT_ATTACHMENT_MIME_TYPES = {"text/plain", "text/markdown", "text/mdx"}
-_DOC_ATTACHMENT_MIME_TYPES = _TEXT_ATTACHMENT_MIME_TYPES | {"application/pdf"}
+_STRUCTURED_ATTACHMENT_EXTENSIONS = {"csv", "xls", "xlsx", "ppt", "pptx"}
+_STRUCTURED_ATTACHMENT_MIME_TYPES = {
+    "application/csv",
+    "text/csv",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+_DOC_ATTACHMENT_MIME_TYPES = (
+    _TEXT_ATTACHMENT_MIME_TYPES
+    | _STRUCTURED_ATTACHMENT_MIME_TYPES
+    | {"application/pdf"}
+)
+_SUPPORTED_ATTACHMENT_EXTENSIONS = {
+    "pdf",
+    "jpg",
+    "jpeg",
+    "png",
+    "txt",
+    "md",
+    "mdx",
+} | _STRUCTURED_ATTACHMENT_EXTENSIONS
+_SUPPORTED_ATTACHMENT_LABELS = (
+    "PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX"
+)
 
 
 def _is_supported_attachment_mime(mime_type: str) -> bool:
     return mime_type.lower() in _SUPPORTED_ATTACHMENT_MIME_TYPES
+
+
+def _is_supported_attachment(file_name: str, mime_type: str) -> bool:
+    extension = Path(file_name).suffix.strip().lower().lstrip(".")
+    return (
+        _is_supported_attachment_mime(mime_type)
+        or extension in _SUPPORTED_ATTACHMENT_EXTENSIONS
+    )
 
 
 def _is_image_attachment(mime_type: str) -> bool:
@@ -1175,6 +1317,18 @@ def _is_image_attachment(mime_type: str) -> bool:
 
 def _is_text_attachment(mime_type: str) -> bool:
     return mime_type.lower() in _TEXT_ATTACHMENT_MIME_TYPES
+
+
+def _is_structured_attachment(extension: str) -> bool:
+    return extension.lower() in _STRUCTURED_ATTACHMENT_EXTENSIONS
+
+
+def _is_document_attachment_ref(attachment: dict[str, Any]) -> bool:
+    mime_type = str(attachment.get("mimeType") or "").lower()
+    extension = str(attachment.get("extension") or "").lower().lstrip(".")
+    return mime_type in _DOC_ATTACHMENT_MIME_TYPES or extension in (
+        _STRUCTURED_ATTACHMENT_EXTENSIONS | {"pdf", "txt", "md", "mdx"}
+    )
 
 
 def _attachment_extension(file_name: str, mime_type: str) -> str:
@@ -1194,13 +1348,78 @@ def _attachment_extension(file_name: str, mime_type: str) -> str:
         return "md"
     if mime_lower == "text/mdx":
         return "mdx"
+    if mime_lower in ("application/csv", "text/csv"):
+        return "csv"
+    if mime_lower == "application/vnd.ms-excel":
+        return "xls"
+    if mime_lower == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        return "xlsx"
+    if mime_lower == "application/vnd.ms-powerpoint":
+        return "ppt"
+    if mime_lower == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        return "pptx"
     return "bin"
 
 
+def _excel_column_label(column_number: int) -> str:
+    label = ""
+    while column_number > 0:
+        column_number, remainder = divmod(column_number - 1, 26)
+        label = chr(65 + remainder) + label
+    return label
 
 
+def _add_structured_attachment_citations(
+    block_container: BlocksContainer,
+    extension: str,
+) -> BlocksContainer:
+    """Stamp source-native locations onto blocks emitted by structured parsers."""
+    normalized_extension = extension.lower()
+    groups_by_index = {group.index: group for group in block_container.block_groups}
 
+    for block in block_container.blocks:
+        citation = block.citation_metadata or CitationMetadata()
+        data = block.data if isinstance(block.data, dict) else {}
 
+        if normalized_extension == "csv":
+            row_number = data.get("row_number")
+            if row_number is not None:
+                citation.row_number = int(row_number)
+        elif normalized_extension in {"xls", "xlsx"}:
+            row_number = data.get("row_number")
+            sheet_number = data.get("sheet_number")
+            sheet_name = data.get("sheet_name")
+            if row_number is not None:
+                row_number = int(row_number)
+                citation.row_number = row_number
+            if sheet_number is not None:
+                citation.sheet_number = int(sheet_number)
+            if sheet_name:
+                citation.sheet_name = str(sheet_name)
+
+            parent_group = groups_by_index.get(block.parent_index)
+            column_count = (
+                parent_group.table_metadata.num_of_cols
+                if parent_group and parent_group.table_metadata
+                else None
+            )
+            if row_number is not None and column_count:
+                last_column = _excel_column_label(column_count)
+                citation.cell_reference = (
+                    f"A{row_number}:{last_column}{row_number}"
+                )
+        elif normalized_extension in {"ppt", "pptx"} and citation.page_number is not None:
+            citation.slide_number = citation.page_number
+
+        block.citation_metadata = citation
+
+    if normalized_extension in {"ppt", "pptx"}:
+        for group in block_container.block_groups:
+            citation = group.citation_metadata
+            if citation and citation.page_number is not None:
+                citation.slide_number = citation.page_number
+
+    return block_container
 
 class _AttachmentSinkNoopVectorStore:
     """Vector store shim for attachment upload sink-only pipeline (skipped by SinkOrchestrator)."""
@@ -1215,6 +1434,7 @@ async def upload_chat_attachments(
     request: Request,
     graph_provider: IGraphDBProvider = Depends(get_graph_provider),
     config_service: ConfigurationService = Depends(get_config_service),
+    parsing_client: ParsingClient = Depends(get_parsing_client),
 ) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -1266,10 +1486,13 @@ async def upload_chat_attachments(
     pdf_processor = PDFPlumberOpenCVProcessor(logger=logger, config=config_service)
 
     for item in payload.attachments:
-        if not _is_supported_attachment_mime(item.mimeType):
+        if not _is_supported_attachment(item.fileName, item.mimeType):
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported attachment type '{item.mimeType}': {item.fileName}. Supported: PDF, JPEG, PNG, TXT, MD, MDX.",
+                detail=(
+                    f"Unsupported attachment type '{item.mimeType}': {item.fileName}. "
+                    f"Supported: {_SUPPORTED_ATTACHMENT_LABELS}."
+                ),
             )
         if item.size <= 0:
             raise HTTPException(status_code=400, detail=f"Attachment size must be positive: {item.fileName}")
@@ -1279,6 +1502,7 @@ async def upload_chat_attachments(
         extension = _attachment_extension(item.fileName, item.mimeType)
         is_image = _is_image_attachment(item.mimeType)
         is_text = _is_text_attachment(item.mimeType)
+        is_structured = _is_structured_attachment(extension)
 
         try:
             file_binary = base64.b64decode(item.contentBase64, validate=True)
@@ -1320,18 +1544,59 @@ async def upload_chat_attachments(
         }
 
         needs_ocr = False
+        parse_mode = "unknown"
         if is_image:
             try:
                 block_containers = _build_image_blocks(file_binary, item.mimeType)
                 parsed_blocks_by_record[record_id] = block_containers
+                parse_mode = "image_direct"
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Failed to process image attachment {item.fileName}: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Failed to process image attachment {item.fileName}: {str(e)}"
+                    ),
+                )
         elif is_text:
             try:
                 block_containers = await _build_text_blocks(file_binary)
                 parsed_blocks_by_record[record_id] = block_containers
+                parse_mode = "markdown"
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Failed to parse text attachment {item.fileName}: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Failed to parse text attachment {item.fileName}: {str(e)}"
+                    ),
+                )
+        elif is_structured:
+            try:
+                parse_result = await parsing_client.parse(
+                    file_content=file_binary,
+                    record_name=item.fileName,
+                    mime_type=item.mimeType,
+                    extension=extension,
+                    org_id=org_id,
+                    provider=ParserProvider.DEFAULT,
+                    skip_table_enrichment=True,
+                )
+                block_containers = _add_structured_attachment_citations(
+                    parse_result.block_container,
+                    extension,
+                )
+                parsed_blocks_by_record[record_id] = block_containers
+                provider_used = parse_result.provider_used or ParserProvider.DEFAULT
+                parse_mode = f"parser_service:{provider_used.value}"
+            except ParsingClientError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to parse structured attachment {item.fileName}: {e.message}",
+                )
+            except ServiceCallError as e:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Parsing service unavailable for {item.fileName}: {str(e)}",
+                )
         else:
             try:
                 needs_ocr = await asyncio.to_thread(_pdf_has_any_ocr_page, file_binary)
@@ -1349,9 +1614,11 @@ async def upload_chat_attachments(
                         _build_pdf_image_blocks, file_binary
                     )
                     ocr_image_pages_used += page_count
+                    parse_mode = "image_direct"
                 else:
                     parsed_data = await pdf_processor.parse_document(item.fileName, file_binary)
                     block_containers = await pdf_processor.create_blocks(parsed_data, skip_llm_enrichment=True)
+                    parse_mode = "pdfplumber"
                 parsed_blocks_by_record[record_id] = block_containers
             except HTTPException:
                 raise
@@ -1377,7 +1644,7 @@ async def upload_chat_attachments(
                 "mimeType": item.mimeType,
                 "extension": extension,
                 "virtualRecordId": record_doc.get("virtualRecordId", virtual_record_id),
-                "ocrMode": "image_direct" if needs_ocr else "pdfplumber",
+                "ocrMode": parse_mode,
             }
         )
 

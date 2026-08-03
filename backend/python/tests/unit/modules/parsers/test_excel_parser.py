@@ -1,9 +1,11 @@
 """Unit tests for pure functions in app.modules.parsers.excel.excel_parser."""
 
 from datetime import datetime
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openpyxl import Workbook
 
 from app.exceptions.indexing_exceptions import DocumentProcessingError
 
@@ -16,6 +18,38 @@ from app.modules.parsers.excel.excel_parser import (
     _strip_leading_zeros,
     format_excel_datetime,
 )
+
+
+@pytest.mark.asyncio
+async def test_parse_skip_table_enrichment_uses_basic_workbook_path():
+    from app.modules.parsers.excel.excel_parser import ExcelParser
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    sheet.append(["region", "revenue"])
+    sheet.append(["North", 120])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+
+    parser = ExcelParser(MagicMock(), MagicMock())
+    with patch(
+        "app.modules.parsers.excel.excel_parser.get_llm_for_role",
+        new_callable=AsyncMock,
+    ) as get_llm:
+        result = await parser.parse(
+            buffer.getvalue(),
+            "revenue.xlsx",
+            {"skip_table_enrichment": True},
+        )
+
+    get_llm.assert_not_awaited()
+    assert len(result.block_container.blocks) == 1
+    block = result.block_container.blocks[0]
+    assert block.data["sheet_name"] == "Revenue"
+    assert block.data["row_number"] == 2
+    assert "region: North" in block.data["row_natural_language_text"]
 
 
 # ---------------------------------------------------------------------------

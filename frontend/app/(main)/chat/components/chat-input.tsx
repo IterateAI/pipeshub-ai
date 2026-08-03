@@ -78,9 +78,27 @@ interface ChatInputProps {
   agentId?: string | null;
 }
 
-const SUPPORTED_FILE_TYPES = ['PDF', 'PNG', 'JPEG', 'JPG', 'TXT', 'MD'];
+const SUPPORTED_FILE_TYPES = [
+  'PDF',
+  'PNG',
+  'JPEG',
+  'JPG',
+  'TXT',
+  'MD',
+  'CSV',
+  'XLS',
+  'XLSX',
+  'PPT',
+  'PPTX',
+];
 const ACCEPTED_MIME_TYPES = {
   'application/pdf': 'PDF',
+  'application/csv': 'CSV',
+  'text/csv': 'CSV',
+  'application/vnd.ms-excel': 'XLS',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+  'application/vnd.ms-powerpoint': 'PPT',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
   'image/png': 'PNG',
   'image/jpeg': 'JPEG',
   'image/jpg': 'JPEG',
@@ -89,7 +107,9 @@ const ACCEPTED_MIME_TYPES = {
 };
 // Extension fallback for files that arrive without a recognisable MIME type
 // (e.g. on some Windows setups the file.type may be empty).
-const ACCEPTED_EXTENSIONS = ['pdf', 'png', 'jpeg', 'jpg', 'txt', 'md'];
+const ACCEPTED_EXTENSIONS = [
+  'pdf', 'png', 'jpeg', 'jpg', 'txt', 'md', 'csv', 'xls', 'xlsx', 'ppt', 'pptx',
+];
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

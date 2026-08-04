@@ -49,12 +49,16 @@ class TestAttachmentMimeHelpers:
         assert _is_supported_attachment_mime(
             "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         ) is True
+        assert _is_supported_attachment_mime(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ) is True
 
     def test_supported_extension_fallback(self):
         from app.api.routes.chatbot import _is_supported_attachment
 
         assert _is_supported_attachment("report.xlsx", "application/octet-stream") is True
         assert _is_supported_attachment("slides.pptx", "") is True
+        assert _is_supported_attachment("memo.docx", "") is True
         assert _is_supported_attachment("archive.zip", "application/octet-stream") is False
 
     def test_text_attachment_detection(self):
@@ -91,6 +95,9 @@ class TestAttachmentMimeHelpers:
         assert _attachment_extension(
             "x", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         ) == "pptx"
+        assert _attachment_extension(
+            "x", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ) == "docx"
         assert _attachment_extension("plain", "application/octet-stream") == "bin"
 
 

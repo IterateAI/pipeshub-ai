@@ -1262,6 +1262,7 @@ _SUPPORTED_ATTACHMENT_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-powerpoint",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "image/jpeg",
     "image/jpg",
     "image/png",
@@ -1271,7 +1272,7 @@ _SUPPORTED_ATTACHMENT_MIME_TYPES = {
 }
 
 _TEXT_ATTACHMENT_MIME_TYPES = {"text/plain", "text/markdown", "text/mdx"}
-_STRUCTURED_ATTACHMENT_EXTENSIONS = {"csv", "xls", "xlsx", "ppt", "pptx"}
+_STRUCTURED_ATTACHMENT_EXTENSIONS = {"csv", "xls", "xlsx", "ppt", "pptx", "docx"}
 _STRUCTURED_ATTACHMENT_MIME_TYPES = {
     "application/csv",
     "text/csv",
@@ -1279,6 +1280,7 @@ _STRUCTURED_ATTACHMENT_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-powerpoint",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 _DOC_ATTACHMENT_MIME_TYPES = (
     _TEXT_ATTACHMENT_MIME_TYPES
@@ -1295,7 +1297,7 @@ _SUPPORTED_ATTACHMENT_EXTENSIONS = {
     "mdx",
 } | _STRUCTURED_ATTACHMENT_EXTENSIONS
 _SUPPORTED_ATTACHMENT_LABELS = (
-    "PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX"
+    "PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX, DOCX"
 )
 
 
@@ -1358,6 +1360,8 @@ def _attachment_extension(file_name: str, mime_type: str) -> str:
         return "ppt"
     if mime_lower == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
         return "pptx"
+    if mime_lower == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return "docx"
     return "bin"
 
 

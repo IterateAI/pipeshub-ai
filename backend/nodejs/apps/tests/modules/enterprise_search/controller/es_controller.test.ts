@@ -11513,6 +11513,33 @@ describe('Enterprise Search Controller', () => {
         expect(res.status.calledWith(200)).to.be.true
       })
 
+      it('should accept a native DOCX attachment', async () => {
+        sinon.stub(AIServiceCommand.prototype, 'execute').callsFake(function (this: any) {
+          const payload = JSON.parse(this.body)
+          expect(payload.attachments[0].fileName).to.equal('memo.docx')
+          expect(payload.attachments[0].mimeType).to.equal(
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          )
+          return Promise.resolve({ statusCode: 200, data: { attachments: [] } } as any)
+        })
+
+        const handler = uploadChatAttachments(createMockAppConfig())
+        const req = createMockRequest({
+          files: [{
+            ...pdfMulterFile,
+            originalname: 'memo.docx',
+            mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          }],
+        })
+        const res = createMockResponse()
+        const next = createMockNext()
+
+        await handler(req, res, next)
+
+        expect(next.called).to.be.false
+        expect(res.status.calledWith(200)).to.be.true
+      })
+
       it('should POST attachment payload to the AI backend and return its JSON', async () => {
         sinon.stub(AIServiceCommand.prototype, 'execute').callsFake(function (this: any) {
           expect(this.uri).to.equal('http://localhost:8000/api/v1/chat/attachments/upload')

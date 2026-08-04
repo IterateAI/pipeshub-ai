@@ -90,6 +90,7 @@ const SUPPORTED_FILE_TYPES = [
   'XLSX',
   'PPT',
   'PPTX',
+  'DOCX',
 ];
 const ACCEPTED_MIME_TYPES = {
   'application/pdf': 'PDF',
@@ -99,6 +100,7 @@ const ACCEPTED_MIME_TYPES = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
   'application/vnd.ms-powerpoint': 'PPT',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
   'image/png': 'PNG',
   'image/jpeg': 'JPEG',
   'image/jpg': 'JPEG',
@@ -108,7 +110,7 @@ const ACCEPTED_MIME_TYPES = {
 // Extension fallback for files that arrive without a recognisable MIME type
 // (e.g. on some Windows setups the file.type may be empty).
 const ACCEPTED_EXTENSIONS = [
-  'pdf', 'png', 'jpeg', 'jpg', 'txt', 'md', 'csv', 'xls', 'xlsx', 'ppt', 'pptx',
+  'pdf', 'png', 'jpeg', 'jpg', 'txt', 'md', 'csv', 'xls', 'xlsx', 'ppt', 'pptx', 'docx',
 ];
 
 function formatFileSize(bytes: number): string {

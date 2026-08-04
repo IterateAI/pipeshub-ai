@@ -5,6 +5,7 @@ content blocks and injecting them into LLM messages.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.utils.chat_helpers import is_base64_image
@@ -17,6 +18,116 @@ _SUPPORTED_IMAGE_PREFIXES: tuple[str, ...] = (
     "data:image/webp",
 )
 
+_STRUCTURED_EXTENSIONS = {
+    "csv", "xls", "xlsx", "ppt", "pptx", "docx", "sqlite", "sqlite3", "db"
+}
+
+
+def structured_record_to_message_content(
+    record: dict[str, Any],
+    extension: str,
+    ref_mapper: Any,
+) -> list[dict[str, Any]]:
+    """Render structured attachment blocks with stable, location-aware citations."""
+    from app.utils.chat_helpers import build_block_web_url  # noqa: PLC0415
+
+    block_container = record.get("block_containers") or {}
+    blocks = block_container.get("blocks") or []
+    block_groups = block_container.get("block_groups") or []
+    groups_by_index = {
+        group.get("index"): group for group in block_groups if isinstance(group, dict)
+    }
+    record_id = str(record.get("id") or "")
+    frontend_url = str(record.get("frontend_url") or "")
+    record_name = str(record.get("record_name") or "structured attachment")
+    normalized_extension = extension.lower().lstrip(".")
+    lines = [f"<record name={record_name!r} format={normalized_extension!r}>"]
+    rendered_group_headers: set[int] = set()
+
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("parent_block_index") is not None:
+            continue
+        block_index = int(block.get("index") or 0)
+        data = block.get("data")
+        citation = block.get("citation_metadata") or {}
+        parent_index = block.get("parent_index")
+        group_data = (groups_by_index.get(parent_index) or {}).get("data") or {}
+        if parent_index is not None and parent_index not in rendered_group_headers:
+            headers = group_data.get("column_headers") or []
+            if headers:
+                sheet_name = group_data.get("sheet_name")
+                prefix = f"Sheet {sheet_name}: " if sheet_name else ""
+                lines.append(prefix + "Columns: " + " | ".join(map(str, headers)))
+            rendered_group_headers.add(parent_index)
+
+        location_parts: list[str] = []
+        if normalized_extension == "csv":
+            row_number = citation.get("row_number") or (
+                data.get("row_number") if isinstance(data, dict) else None
+            )
+            if row_number is not None:
+                location_parts.append(f"CSV row {row_number}")
+        elif normalized_extension in {"xls", "xlsx"}:
+            sheet_name = citation.get("sheet_name") or (
+                data.get("sheet_name") if isinstance(data, dict) else None
+            )
+            cell_reference = citation.get("cell_reference")
+            row_number = citation.get("row_number") or (
+                data.get("row_number") if isinstance(data, dict) else None
+            )
+            if sheet_name:
+                location_parts.append(f"sheet {sheet_name}")
+            if cell_reference:
+                location_parts.append(str(cell_reference))
+            elif row_number is not None:
+                location_parts.append(f"row {row_number}")
+        elif normalized_extension in {"ppt", "pptx"}:
+            slide_number = citation.get("slide_number") or citation.get("page_number")
+            if slide_number is not None:
+                location_parts.append(f"slide {slide_number}")
+
+        if isinstance(data, dict):
+            row_values = data.get("row_values")
+            rendered_data = (
+                " | ".join("" if value is None else str(value) for value in row_values)
+                if isinstance(row_values, list)
+                else str(data.get("row_natural_language_text") or data)
+            )
+        else:
+            rendered_data = str(data or "")
+        if not rendered_data:
+            continue
+        block_url = build_block_web_url(frontend_url, record_id, block_index)
+        citation_ref = ref_mapper.get_or_create_ref(block_url)
+        location = ", ".join(location_parts) or f"block {block_index}"
+        lines.append(f"- [{citation_ref}] {location}: {rendered_data}")
+
+    lines.append("</record>")
+    return [{"type": "text", "text": "\n".join(lines)}]
+
+
+async def _capture_input_file(
+    *,
+    record: dict[str, Any],
+    record_name: str,
+    blob_store: Any,
+    org_id: str,
+    out_files: dict[str, bytes] | None,
+    logger: logging.Logger,
+) -> None:
+    if out_files is None:
+        return
+    storage_id = record.get("external_record_id") or record.get("externalRecordId")
+    if not storage_id:
+        logger.warning("Attachment record has no raw storage ID: %s", record_name)
+        return
+    try:
+        out_files[Path(record_name).name] = await blob_store.get_binary_from_storage(
+            str(storage_id), org_id
+        )
+    except Exception as exc:
+        logger.warning("Could not stage raw attachment %s: %s", record_name, exc)
+
 
 async def resolve_attachments(
     attachments: list[dict[str, Any]],
@@ -26,6 +137,7 @@ async def resolve_attachments(
     logger: logging.Logger,
     ref_mapper: Any = None,
     out_records: dict[str, dict[str, Any]] | None = None,
+    out_files: dict[str, bytes] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch user-uploaded attachments and return LangChain content blocks.
 
@@ -69,8 +181,10 @@ async def resolve_attachments(
         is_image = mime_type.startswith("image/")
         is_pdf = mime_type.lower() == "application/pdf"
         is_text = mime_type.lower() in ("text/plain", "text/markdown", "text/mdx")
+        extension = str(att.get("extension") or Path(record_name).suffix.lstrip(".")).lower()
+        is_structured = extension in _STRUCTURED_EXTENSIONS
 
-        if not is_image and not is_pdf and not is_text:
+        if not is_image and not is_pdf and not is_text and not is_structured:
             logger.debug(
                 "Skipping unsupported attachment type: %s (%s)", record_name, mime_type
             )
@@ -110,6 +224,14 @@ async def resolve_attachments(
 
                 if out_records is not None:
                     out_records[virtual_record_id] = record
+                await _capture_input_file(
+                    record=record,
+                    record_name=record_name,
+                    blob_store=blob_store,
+                    org_id=org_id,
+                    out_files=out_files,
+                    logger=logger,
+                )
 
                 image_blocks = _extract_image_blocks(record, record_name, logger)
                 if image_blocks:
@@ -127,7 +249,7 @@ async def resolve_attachments(
                     exc_info=True,
                 )
 
-        elif is_pdf or is_text:
+        elif is_pdf or is_text or is_structured:
             if blob_store is None:
                 logger.warning(
                     "blob_store not available; cannot resolve attachment %s",
@@ -156,9 +278,23 @@ async def resolve_attachments(
                 if out_records is not None:
                     out_records[virtual_record_id] = record
 
-                doc_content, ref_mapper = record_to_message_content(
-                    record, ref_mapper=ref_mapper, is_multimodal_llm=is_multimodal_llm
+                await _capture_input_file(
+                    record=record,
+                    record_name=record_name,
+                    blob_store=blob_store,
+                    org_id=org_id,
+                    out_files=out_files,
+                    logger=logger,
                 )
+
+                if is_structured:
+                    doc_content = structured_record_to_message_content(
+                        record, extension, ref_mapper
+                    )
+                else:
+                    doc_content, ref_mapper = record_to_message_content(
+                        record, ref_mapper=ref_mapper, is_multimodal_llm=is_multimodal_llm
+                    )
                 if doc_content:
                     blocks.extend(doc_content)
                 else:
@@ -301,6 +437,7 @@ async def ensure_attachment_blocks(state: dict, logger: logging.Logger) -> list:
             state["citation_ref_mapper"] = ref_mapper
 
         attachment_records: dict[str, dict[str, Any]] = {}
+        attachment_input_files: dict[str, bytes] = {}
         blocks = await resolve_attachments(
             attachments=raw_attachments,
             blob_store=blob_store,
@@ -309,7 +446,10 @@ async def ensure_attachment_blocks(state: dict, logger: logging.Logger) -> list:
             logger=logger,
             ref_mapper=ref_mapper,
             out_records=attachment_records,
+            out_files=attachment_input_files,
         )
+
+        state["attachment_input_files"] = attachment_input_files
 
         if attachment_records:
             vrmap = state.get("virtual_record_id_to_result")

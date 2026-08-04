@@ -4626,6 +4626,7 @@ async def _ensure_attachment_blocks(state: ChatState, log: logging.Logger) -> li
             state["citation_ref_mapper"] = ref_mapper
 
         attachment_records: dict[str, dict[str, Any]] = {}
+        attachment_input_files: dict[str, bytes] = {}
         blocks = await resolve_attachments(
             attachments=raw_attachments,
             blob_store=blob_store,
@@ -4634,7 +4635,9 @@ async def _ensure_attachment_blocks(state: ChatState, log: logging.Logger) -> li
             logger=log,
             ref_mapper=ref_mapper,
             out_records=attachment_records,
+            out_files=attachment_input_files,
         )
+        state["attachment_input_files"] = attachment_input_files
 
         if attachment_records:
             vrmap = state.get("virtual_record_id_to_result")

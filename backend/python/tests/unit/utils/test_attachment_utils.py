@@ -496,6 +496,49 @@ class TestResolveAttachments:
             result = await resolve_attachments([att], blob, "org1", False, logger)
         assert result == mdx_blocks
 
+    async def test_structured_attachment_stages_raw_input_and_citation_blocks(self, logger):
+        record = {
+            "id": "record-1",
+            "record_name": "ledger.csv",
+            "external_record_id": "storage-1",
+            "block_containers": {
+                "blocks": [
+                    {
+                        "index": 1,
+                        "type": "table_row",
+                        "data": {"row_number": 2, "row_values": ["West", 42]},
+                        "citation_metadata": {"row_number": 2},
+                    }
+                ],
+                "block_groups": [],
+            },
+        }
+        blob = AsyncMock()
+        blob.get_record_from_storage.return_value = record
+        blob.get_binary_from_storage.return_value = b"region,revenue\nWest,42\n"
+        att = {
+            "mimeType": "text/csv",
+            "recordName": "ledger.csv",
+            "extension": "csv",
+            "virtualRecordId": "vrid1",
+        }
+        out_files: dict[str, bytes] = {}
+        mapper = MagicMock()
+        mapper.get_or_create_ref.return_value = "ref1"
+        result = await resolve_attachments(
+            [att],
+            blob,
+            "org1",
+            False,
+            logger,
+            ref_mapper=mapper,
+            out_files=out_files,
+        )
+        assert result[0]["type"] == "text"
+        assert "CSV row 2" in result[0]["text"]
+        assert out_files["ledger.csv"] == b"region,revenue\nWest,42\n"
+        blob.get_binary_from_storage.assert_awaited_once_with("storage-1", "org1")
+
     async def test_multiple_attachments_processed(self, logger):
         blob = AsyncMock()
         blob.get_record_from_storage.return_value = _make_image_record(_PNG_URI)

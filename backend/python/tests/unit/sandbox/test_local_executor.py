@@ -52,6 +52,16 @@ class TestLocalExecutorExecute:
             assert result.success is False
             assert "boom" in (result.error or "")
 
+    @pytest.mark.asyncio
+    async def test_uploaded_input_files_are_available_through_input_dir(self, executor):
+        result = await executor.execute(
+            "import os; print(open(os.path.join(os.environ['INPUT_DIR'], 'data.csv')).read())",
+            SandboxLanguage.PYTHON,
+            input_files={"../data.csv": b"region,revenue\nWest,42\n"},
+        )
+        assert result.success is True
+        assert "West,42" in result.stdout
+
 
 class TestLocalExecutorPython:
     @pytest.fixture

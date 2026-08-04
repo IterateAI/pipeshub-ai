@@ -55,6 +55,21 @@ class TestExecutePython:
             assert data["exit_code"] == 0
 
     @pytest.mark.asyncio
+    async def test_passes_uploaded_files_to_executor(self):
+        from app.agents.actions.coding_sandbox.coding_sandbox import CodingSandbox
+
+        input_files = {"ledger.csv": b"region,revenue\nWest,42\n"}
+        sandbox = CodingSandbox(_make_state(attachment_input_files=input_files))
+        mock_result = ExecutionResult(success=True, stdout="42\n", exit_code=0)
+        with patch("app.agents.actions.coding_sandbox.coding_sandbox.get_executor") as mock_get:
+            mock_executor = AsyncMock()
+            mock_executor.execute = AsyncMock(return_value=mock_result)
+            mock_get.return_value = mock_executor
+            success, _ = await sandbox.execute_python("print(42)")
+        assert success is True
+        assert mock_executor.execute.await_args.kwargs["input_files"] == input_files
+
+    @pytest.mark.asyncio
     async def test_failure(self):
         from app.agents.actions.coding_sandbox.coding_sandbox import CodingSandbox
 

@@ -53,6 +53,7 @@ class BaseExecutor(ABC):
         timeout_seconds: int = 60,
         packages: list[str] | None = None,
         env: dict[str, str] | None = None,
+        input_files: dict[str, bytes] | None = None,
     ) -> ExecutionResult:
         """Run *code* in the given *language* and return an ExecutionResult."""
 

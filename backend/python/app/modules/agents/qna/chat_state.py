@@ -163,6 +163,7 @@ class ChatState(TypedDict):
     citation_ref_mapper: CitationRefMapper | None  # Bidirectional mapping between tiny refs (ref1, ref2) and full block web URLs
     attachments: list[dict[str, Any]] | None  # User-uploaded attachment metadata from the client (recordId, virtualRecordId, mimeType, etc.)
     resolved_attachment_blocks: list | None  # Pre-resolved image_url blocks for multimodal LLM injection; populated on first LLM call
+    attachment_input_files: dict[str, bytes] | None  # Authenticated copies exposed to the isolated sandbox as /inputs
 
     # Reflection and retry fields (for intelligent error recovery)
     reflection: dict[str, Any] | None  # Reflection analysis result from reflect_node
@@ -560,6 +561,7 @@ def build_initial_state(chat_query: dict[str, Any], user_info: dict[str, Any], l
         # Attachments (uploaded images/PDFs from client)
         "attachments": chat_query.get("attachments", []),
         "resolved_attachment_blocks": None,
+        "attachment_input_files": {},
 
         # Reflection and retry fields (for intelligent error recovery)
         "reflection": None,

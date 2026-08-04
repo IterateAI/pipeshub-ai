@@ -83,11 +83,24 @@ class LocalExecutor(BaseExecutor):
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         packages: list[str] | None = None,
         env: dict[str, str] | None = None,
+        input_files: dict[str, bytes] | None = None,
     ) -> ExecutionResult:
         execution_id = str(uuid4())
         work_dir = os.path.join(_SANDBOX_ROOT, execution_id)
         output_dir = os.path.join(work_dir, "output")
+        input_dir = os.path.join(work_dir, "inputs")
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(input_dir, exist_ok=True)
+        for file_name, file_bytes in (input_files or {}).items():
+            safe_name = os.path.basename(file_name)
+            if not safe_name:
+                continue
+            input_path = os.path.join(input_dir, safe_name)
+            with open(input_path, "wb") as stream:
+                stream.write(file_bytes)
+            os.chmod(input_path, 0o444)
+
+        run_env = {**(env or {}), "INPUT_DIR": input_dir}
 
         logger.info(
             "[LocalExecutor] execute START | id=%s language=%s timeout=%ds "
@@ -99,13 +112,13 @@ class LocalExecutor(BaseExecutor):
 
         try:
             if language == SandboxLanguage.PYTHON:
-                result = await self._run_python(code, work_dir, output_dir, timeout_seconds, packages, env)
+                result = await self._run_python(code, work_dir, output_dir, timeout_seconds, packages, run_env)
             elif language == SandboxLanguage.TYPESCRIPT:
-                result = await self._run_typescript(code, work_dir, output_dir, timeout_seconds, packages, env)
+                result = await self._run_typescript(code, work_dir, output_dir, timeout_seconds, packages, run_env)
             elif language == SandboxLanguage.SQLITE:
-                result = await self._run_sqlite(code, work_dir, output_dir, timeout_seconds, env)
+                result = await self._run_sqlite(code, work_dir, output_dir, timeout_seconds, run_env)
             elif language == SandboxLanguage.POSTGRESQL:
-                result = await self._run_postgresql(code, work_dir, output_dir, timeout_seconds, env)
+                result = await self._run_postgresql(code, work_dir, output_dir, timeout_seconds, run_env)
             else:
                 result = ExecutionResult(
                     success=False,

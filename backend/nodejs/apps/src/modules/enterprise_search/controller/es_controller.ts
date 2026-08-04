@@ -599,6 +599,8 @@ const SUPPORTED_CHAT_ATTACHMENT_MIMETYPES = new Set([
   'application/vnd.ms-powerpoint',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.sqlite3',
+  'application/x-sqlite3',
   'text/plain',
   'text/markdown',
   'text/mdx',
@@ -618,6 +620,9 @@ const SUPPORTED_CHAT_ATTACHMENT_EXTENSIONS = new Set([
   'ppt',
   'pptx',
   'docx',
+  'sqlite',
+  'sqlite3',
+  'db',
 ]);
 
 const isSupportedChatAttachment = (file: Express.Multer.File): boolean => {
@@ -641,7 +646,7 @@ export const uploadChatAttachments =
       );
       if (invalidFile) {
         throw new BadRequestError(
-          `Unsupported attachment type: ${invalidFile.originalname}. Supported types: PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX, DOCX.`,
+          `Unsupported attachment type: ${invalidFile.originalname}. Supported types: PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX, DOCX, SQLite.`,
         );
       }
 

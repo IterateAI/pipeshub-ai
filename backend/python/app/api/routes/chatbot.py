@@ -3,6 +3,8 @@ from collections.abc import AsyncGenerator
 import base64
 import logging
 from pathlib import Path
+import sqlite3
+import tempfile
 from typing import Any
 from uuid import uuid4
 
@@ -265,6 +267,44 @@ async def _build_text_blocks(file_content: bytes) -> BlocksContainer:
         text = file_content.decode("latin-1")
     parser = MarkdownItParser()
     return await parser.parse_to_blocks(text.strip())
+
+
+def _build_sqlite_blocks(file_content: bytes) -> BlocksContainer:
+    """Expose SQLite schema metadata while preserving the raw DB for sandbox use."""
+    blocks: list[Block] = []
+    with tempfile.NamedTemporaryFile(suffix=".sqlite") as temporary:
+        temporary.write(file_content)
+        temporary.flush()
+        connection = sqlite3.connect(f"file:{temporary.name}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            ).fetchall()
+        finally:
+            connection.close()
+    for index, (name, sql) in enumerate(rows):
+        blocks.append(
+            Block(
+                index=index,
+                type=BlockType.TEXT,
+                format=DataFormat.TXT,
+                data=f"SQLite object {name}: {sql or 'schema unavailable'}",
+                citation_metadata=CitationMetadata(section_title=f"SQLite schema: {name}"),
+            )
+        )
+    if not blocks:
+        blocks.append(
+            Block(
+                index=0,
+                type=BlockType.TEXT,
+                format=DataFormat.TXT,
+                data="SQLite database contains no user tables or views.",
+                citation_metadata=CitationMetadata(section_title="SQLite schema"),
+            )
+        )
+    return BlocksContainer(blocks=blocks, block_groups=[])
 
 
 # Dependency injection functions
@@ -1263,6 +1303,8 @@ _SUPPORTED_ATTACHMENT_MIME_TYPES = {
     "application/vnd.ms-powerpoint",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.sqlite3",
+    "application/x-sqlite3",
     "image/jpeg",
     "image/jpg",
     "image/png",
@@ -1273,6 +1315,7 @@ _SUPPORTED_ATTACHMENT_MIME_TYPES = {
 
 _TEXT_ATTACHMENT_MIME_TYPES = {"text/plain", "text/markdown", "text/mdx"}
 _STRUCTURED_ATTACHMENT_EXTENSIONS = {"csv", "xls", "xlsx", "ppt", "pptx", "docx"}
+_DATABASE_ATTACHMENT_EXTENSIONS = {"sqlite", "sqlite3", "db"}
 _STRUCTURED_ATTACHMENT_MIME_TYPES = {
     "application/csv",
     "text/csv",
@@ -1296,8 +1339,9 @@ _SUPPORTED_ATTACHMENT_EXTENSIONS = {
     "md",
     "mdx",
 } | _STRUCTURED_ATTACHMENT_EXTENSIONS
+_SUPPORTED_ATTACHMENT_EXTENSIONS |= _DATABASE_ATTACHMENT_EXTENSIONS
 _SUPPORTED_ATTACHMENT_LABELS = (
-    "PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX, DOCX"
+    "PDF, JPEG, PNG, TXT, MD, MDX, CSV, XLS, XLSX, PPT, PPTX, DOCX, SQLite"
 )
 
 
@@ -1325,11 +1369,17 @@ def _is_structured_attachment(extension: str) -> bool:
     return extension.lower() in _STRUCTURED_ATTACHMENT_EXTENSIONS
 
 
+def _is_database_attachment(extension: str) -> bool:
+    return extension.lower() in _DATABASE_ATTACHMENT_EXTENSIONS
+
+
 def _is_document_attachment_ref(attachment: dict[str, Any]) -> bool:
     mime_type = str(attachment.get("mimeType") or "").lower()
     extension = str(attachment.get("extension") or "").lower().lstrip(".")
     return mime_type in _DOC_ATTACHMENT_MIME_TYPES or extension in (
-        _STRUCTURED_ATTACHMENT_EXTENSIONS | {"pdf", "txt", "md", "mdx"}
+        _STRUCTURED_ATTACHMENT_EXTENSIONS
+        | _DATABASE_ATTACHMENT_EXTENSIONS
+        | {"pdf", "txt", "md", "mdx"}
     )
 
 
@@ -1362,6 +1412,8 @@ def _attachment_extension(file_name: str, mime_type: str) -> str:
         return "pptx"
     if mime_lower == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         return "docx"
+    if mime_lower in {"application/vnd.sqlite3", "application/x-sqlite3"}:
+        return "sqlite"
     return "bin"
 
 
@@ -1507,6 +1559,7 @@ async def upload_chat_attachments(
         is_image = _is_image_attachment(item.mimeType)
         is_text = _is_text_attachment(item.mimeType)
         is_structured = _is_structured_attachment(extension)
+        is_database = _is_database_attachment(extension)
 
         try:
             file_binary = base64.b64decode(item.contentBase64, validate=True)
@@ -1572,6 +1625,18 @@ async def upload_chat_attachments(
                     detail=(
                         f"Failed to parse text attachment {item.fileName}: {str(e)}"
                     ),
+                )
+        elif is_database:
+            try:
+                block_containers = await asyncio.to_thread(
+                    _build_sqlite_blocks, file_binary
+                )
+                parsed_blocks_by_record[record_id] = block_containers
+                parse_mode = "sqlite_schema"
+            except sqlite3.DatabaseError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to open SQLite attachment {item.fileName}: {str(e)}",
                 )
         elif is_structured:
             try:

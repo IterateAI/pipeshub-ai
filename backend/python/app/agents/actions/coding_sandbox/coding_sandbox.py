@@ -40,7 +40,8 @@ class ExecutePythonInput(BaseModel):
         description=(
             "Python code to execute. "
             "IMPORTANT: The sandbox has NO internet access -- do not use urllib, requests, httpx, or any network calls. "
-            "All data must be passed inline in the code or generated within the code itself. "
+            "Uploaded user files are available read-only in the directory named by INPUT_DIR. "
+            "Use os.listdir(os.environ['INPUT_DIR']) to discover their exact names. "
             "Write output files to the path in the OUTPUT_DIR environment variable. "
             "Example: open(os.path.join(os.environ['OUTPUT_DIR'], 'chart.png'), 'wb')"
         ),
@@ -63,7 +64,8 @@ class ExecuteTypeScriptInput(BaseModel):
         description=(
             "TypeScript code to execute. "
             "IMPORTANT: The sandbox has NO internet access -- do not use fetch, axios, http, or any network calls. "
-            "All data must be passed inline in the code or generated within the code itself. "
+            "Uploaded user files are available read-only in the directory named by INPUT_DIR. "
+            "Use fs.readdirSync(process.env.INPUT_DIR!) to discover their exact names. "
             "Write output files to the path in the OUTPUT_DIR environment variable. "
             "Example: fs.writeFileSync(path.join(process.env.OUTPUT_DIR!, 'report.html'), html)"
         ),
@@ -235,7 +237,7 @@ class CodingSandbox:
         llm_description=(
             "Execute Python code in an isolated sandbox with NO internet access. "
             "The sandbox cannot make any network requests (no urllib, requests, httpx, API calls, web scraping, etc.). "
-            "All data needed for computation must be embedded directly in the code as literals or variables. "
+            "Uploaded files are available read-only under os.environ['INPUT_DIR']; inspect that directory and compute from the files instead of copying their contents into code. "
             "Use this to generate files such as charts (matplotlib/plotly), documents (python-docx/python-pptx), "
             "images (Pillow), CSV/Excel (pandas/openpyxl), PDF (reportlab/fpdf), or perform data processing. "
             "Write output files to os.path.join(os.environ['OUTPUT_DIR'], 'filename'). "
@@ -297,6 +299,7 @@ class CodingSandbox:
                 code=code,
                 language=SandboxLanguage.PYTHON,
                 packages=requirements or [],
+                input_files=self.chat_state.get("attachment_input_files") or {},
             )
             logger.info(
                 "[execute_python] OUTPUT | success=%s exit_code=%s time_ms=%s artifacts=%d "
@@ -339,7 +342,7 @@ class CodingSandbox:
         llm_description=(
             "Execute TypeScript code in an isolated sandbox with NO internet access. "
             "The sandbox cannot make any network requests (no fetch, axios, http, API calls, web scraping, etc.). "
-            "All data needed for computation must be embedded directly in the code as literals or variables. "
+            "Uploaded files are available read-only under process.env.INPUT_DIR; inspect that directory and compute from the files instead of copying their contents into code. "
             "Use this when JavaScript/TypeScript is more appropriate for the task. "
             "Write output files to path.join(process.env.OUTPUT_DIR!, 'filename'). "
             "Common packages are pre-installed: fs-extra, chart.js, sharp. "
@@ -390,6 +393,7 @@ class CodingSandbox:
                 code=code,
                 language=SandboxLanguage.TYPESCRIPT,
                 packages=packages or [],
+                input_files=self.chat_state.get("attachment_input_files") or {},
             )
             logger.info(
                 "[execute_typescript] OUTPUT | success=%s exit_code=%s time_ms=%s artifacts=%d "

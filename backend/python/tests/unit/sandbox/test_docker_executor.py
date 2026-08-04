@@ -220,8 +220,8 @@ class TestExecutePackageValidation:
                 return_value=ExecutionResult(success=True, exit_code=0),
             ) as run:
                 result = await executor.execute(
-                    "import pandas", SandboxLanguage.PYTHON,
-                    packages=["pandas"],
+                    "import pyarrow", SandboxLanguage.PYTHON,
+                    packages=["pyarrow"],
                 )
                 assert result.success is True
                 install.assert_called_once()
@@ -635,12 +635,30 @@ class TestEndToEndExecuteSetsPythonPath:
         ):
             with patch.object(executor, "_run_container", side_effect=fake_run_container):
                 result = await executor.execute(
-                    "import pandas", SandboxLanguage.PYTHON,
-                    packages=["pandas"],
+                    "import pyarrow", SandboxLanguage.PYTHON,
+                    packages=["pyarrow"],
                 )
                 assert result.success is True
         assert captured_env.get("PYTHONPATH") == "/deps"
         assert captured_env.get("OUTPUT_DIR") == "/output"
+
+    @pytest.mark.asyncio
+    async def test_preinstalled_python_package_skips_install(self, executor):
+        captured_env: dict = {}
+
+        async def fake_run_container(*, env, **kwargs):
+            captured_env.update(env)
+            return ExecutionResult(success=True, exit_code=0)
+
+        with patch.object(executor, "_install_dependencies") as install:
+            with patch.object(executor, "_run_container", side_effect=fake_run_container):
+                result = await executor.execute(
+                    "import pandas", SandboxLanguage.PYTHON,
+                    packages=["pandas"],
+                )
+                assert result.success is True
+        install.assert_not_called()
+        assert captured_env.get("PYTHONPATH") != "/deps"
 
     @pytest.mark.asyncio
     async def test_nodepath_set_when_packages_installed(self, executor):

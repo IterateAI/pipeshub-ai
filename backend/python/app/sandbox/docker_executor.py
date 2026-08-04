@@ -47,6 +47,7 @@ from app.sandbox.models import (
     SandboxLanguage,
     validate_packages,
 )
+from app.sandbox.package_policy import canonicalize
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,43 @@ _DEFAULT_EGRESS_NETWORK = "pipeshub_sandbox_egress"
 #: point at an internal mirror can override these.
 _DEFAULT_PIP_INDEX_URL = os.environ.get("SANDBOX_PIP_INDEX_URL", "https://pypi.org/simple")
 _DEFAULT_NPM_REGISTRY = os.environ.get("SANDBOX_NPM_REGISTRY", "https://registry.npmjs.org")
+
+# Keep this aligned with deployment/sandbox/Dockerfile. Unversioned requests for
+# these libraries can use the image copy directly instead of performing a
+# redundant network install before an otherwise offline execution.
+_PREINSTALLED_PYTHON_PACKAGES: frozenset[str] = frozenset({
+    "cairosvg",
+    "fpdf2",
+    "jinja2",
+    "kaleido",
+    "matplotlib",
+    "numpy",
+    "openpyxl",
+    "pandas",
+    "pillow",
+    "plotly",
+    "python-docx",
+    "python-pptx",
+    "reportlab",
+    "scipy",
+    "seaborn",
+    "tabulate",
+    "xlsxwriter",
+})
+
+
+def _packages_requiring_install(
+    packages: list[str],
+    language: SandboxLanguage,
+) -> list[str]:
+    if language != SandboxLanguage.PYTHON:
+        return packages
+    return [
+        package
+        for package in packages
+        if any(character in package for character in "<>=!~")
+        or canonicalize(package, language) not in _PREINSTALLED_PYTHON_PACKAGES
+    ]
 
 
 class DockerExecutor(BaseExecutor):
@@ -93,13 +131,24 @@ class DockerExecutor(BaseExecutor):
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         packages: list[str] | None = None,
         env: dict[str, str] | None = None,
+        input_files: dict[str, bytes] | None = None,
     ) -> ExecutionResult:
         execution_id = str(uuid4())
         work_dir = os.path.join(_SANDBOX_ROOT, execution_id)
         output_dir = os.path.join(work_dir, "output")
         src_dir = os.path.join(work_dir, "src")
+        input_dir = os.path.join(work_dir, "inputs")
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(src_dir, exist_ok=True)
+        os.makedirs(input_dir, exist_ok=True)
+        for file_name, file_bytes in (input_files or {}).items():
+            safe_name = os.path.basename(file_name)
+            if not safe_name:
+                continue
+            input_path = os.path.join(input_dir, safe_name)
+            with open(input_path, "wb") as stream:
+                stream.write(file_bytes)
+            os.chmod(input_path, 0o444)
 
         start_ms = _now_ms()
 
@@ -114,10 +163,11 @@ class DockerExecutor(BaseExecutor):
             # offline run container.
             deps_tar: bytes | None = None
             deps_target: str | None = None
-            if safe_packages:
+            packages_to_install = _packages_requiring_install(safe_packages, lang)
+            if packages_to_install:
                 deps_tar, deps_target = await asyncio.to_thread(
                     self._install_dependencies,
-                    safe_packages,
+                    packages_to_install,
                     lang,
                     timeout_seconds,
                 )
@@ -126,7 +176,11 @@ class DockerExecutor(BaseExecutor):
             # Pass only the shared allowlist + caller-provided env into the
             # container. Do NOT forward the host's full environ (OPENAI_API_KEY,
             # Arango/Neo4j creds, JWT secrets, etc.) into user-controlled code.
-            run_env: dict[str, str] = {**(env or {}), "OUTPUT_DIR": "/output"}
+            run_env: dict[str, str] = {
+                **(env or {}),
+                "OUTPUT_DIR": "/output",
+                "INPUT_DIR": "/inputs",
+            }
             if deps_target == "/deps":
                 run_env["PYTHONPATH"] = "/deps"
             elif deps_target == "/node_modules":
@@ -138,6 +192,7 @@ class DockerExecutor(BaseExecutor):
                 command=cmd,
                 work_dir=work_dir,
                 src_dir=src_dir,
+                input_dir=input_dir,
                 output_dir=output_dir,
                 env=container_env,
                 timeout=timeout_seconds,
@@ -332,6 +387,7 @@ class DockerExecutor(BaseExecutor):
         work_dir: str,
         src_dir: str,
         output_dir: str,
+        input_dir: str | None = None,
         env: dict[str, str],
         timeout: int,
         deps_tar: bytes | None = None,
@@ -401,6 +457,9 @@ class DockerExecutor(BaseExecutor):
             # Inject source files and create output directory inside the
             # container (avoids host-path volume mounts entirely).
             container.put_archive("/src", _tar_directory(src_dir))
+            container.put_archive("/", _tar_empty_dir("inputs", mode=0o555))
+            if input_dir and os.listdir(input_dir):
+                container.put_archive("/inputs", _tar_directory(input_dir))
             container.put_archive("/", _tar_empty_dir("output", mode=0o777))
             if deps_tar and deps_target:
                 # Create the target directory then extract the deps tar into

@@ -14,6 +14,7 @@ from app.utils.attachment_utils import (
     inject_attachment_blocks,
     resolve_attachments,
     resolve_attachment_blocks_simple,
+    structured_record_to_message_content,
 )
 
 # ---------------------------------------------------------------------------
@@ -538,6 +539,31 @@ class TestResolveAttachments:
         assert "CSV row 2" in result[0]["text"]
         assert out_files["ledger.csv"] == b"region,revenue\nWest,42\n"
         blob.get_binary_from_storage.assert_awaited_once_with("storage-1", "org1")
+
+    def test_large_structured_attachment_uses_sandbox_handoff(self, monkeypatch):
+        monkeypatch.setenv("PIPESHUB_STRUCTURED_ATTACHMENT_INLINE_MAX_CHARS", "80")
+        record = {
+            "id": "record-1",
+            "record_name": "large.csv",
+            "block_containers": {
+                "blocks": [
+                    {
+                        "index": 1,
+                        "data": {"row_number": 2, "row_values": ["West", "x" * 100]},
+                        "citation_metadata": {"row_number": 2},
+                    }
+                ],
+                "block_groups": [],
+            },
+        }
+        mapper = MagicMock()
+        mapper.get_or_create_ref.return_value = "ref1"
+
+        result = structured_record_to_message_content(record, "csv", mapper)
+
+        assert "access='sandbox'" in result[0]["text"]
+        assert "INPUT_DIR" in result[0]["text"]
+        assert "x" * 100 not in result[0]["text"]
 
     async def test_multiple_attachments_processed(self, logger):
         blob = AsyncMock()

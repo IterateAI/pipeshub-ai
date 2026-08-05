@@ -5,6 +5,7 @@ content blocks and injecting them into LLM messages.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,19 @@ _SUPPORTED_IMAGE_PREFIXES: tuple[str, ...] = (
 _STRUCTURED_EXTENSIONS = {
     "csv", "xls", "xlsx", "ppt", "pptx", "docx", "sqlite", "sqlite3", "db"
 }
+_DEFAULT_STRUCTURED_INLINE_MAX_CHARS = 200_000
+
+
+def structured_attachment_inline_limit() -> int:
+    """Return the structured-text ceiling before sandbox-only handoff."""
+    raw = os.getenv(
+        "PIPESHUB_STRUCTURED_ATTACHMENT_INLINE_MAX_CHARS",
+        str(_DEFAULT_STRUCTURED_INLINE_MAX_CHARS),
+    )
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return _DEFAULT_STRUCTURED_INLINE_MAX_CHARS
 
 
 def structured_record_to_message_content(
@@ -103,7 +117,21 @@ def structured_record_to_message_content(
         lines.append(f"- [{citation_ref}] {location}: {rendered_data}")
 
     lines.append("</record>")
-    return [{"type": "text", "text": "\n".join(lines)}]
+    rendered = "\n".join(lines)
+    inline_limit = structured_attachment_inline_limit()
+    if inline_limit and len(rendered) > inline_limit:
+        rendered = (
+            f"<record name={record_name!r} format={normalized_extension!r} "
+            "access='sandbox'>\n"
+            f"The parsed attachment is too large to inline ({len(rendered)} characters). "
+            f"The original file is available read-only as {Path(record_name).name!r} "
+            "under os.environ['INPUT_DIR'] in the coding sandbox. Use Python or "
+            "read-only SQL to inspect the file and compute the answer. Do not infer "
+            "values from memory. Cite the exact worksheet/cells, CSV rows/columns, "
+            "slides, or SQL query used.\n"
+            "</record>"
+        )
+    return [{"type": "text", "text": rendered}]
 
 
 async def _capture_input_file(

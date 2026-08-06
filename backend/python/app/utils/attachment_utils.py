@@ -5,6 +5,7 @@ content blocks and injecting them into LLM messages.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.utils.chat_helpers import is_base64_image
@@ -17,6 +18,32 @@ _SUPPORTED_IMAGE_PREFIXES: tuple[str, ...] = (
     "data:image/webp",
 )
 
+_CSV_MIME_TYPES = {"application/csv", "text/csv"}
+
+
+async def _capture_input_file(
+    *,
+    record: dict[str, Any],
+    record_name: str,
+    blob_store: Any,
+    org_id: str,
+    out_files: dict[str, bytes] | None,
+    logger: logging.Logger,
+) -> None:
+    if out_files is None:
+        return
+    storage_id = record.get("external_record_id") or record.get("externalRecordId")
+    if not storage_id:
+        logger.warning("Attachment record has no raw storage ID: %s", record_name)
+        return
+    try:
+        safe_name = Path(record_name).name
+        out_files[f"input/attachments/{safe_name}"] = (
+            await blob_store.get_binary_from_storage(str(storage_id), org_id)
+        )
+    except Exception as exc:
+        logger.warning("Could not stage raw attachment %s: %s", record_name, exc)
+
 
 async def resolve_attachments(
     attachments: list[dict[str, Any]],
@@ -26,6 +53,7 @@ async def resolve_attachments(
     logger: logging.Logger,
     ref_mapper: Any = None,
     out_records: dict[str, dict[str, Any]] | None = None,
+    out_files: dict[str, bytes] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch user-uploaded attachments and return LangChain content blocks.
 
@@ -69,8 +97,9 @@ async def resolve_attachments(
         is_image = mime_type.startswith("image/")
         is_pdf = mime_type.lower() == "application/pdf"
         is_text = mime_type.lower() in ("text/plain", "text/markdown", "text/mdx")
+        is_csv = mime_type.lower() in _CSV_MIME_TYPES or Path(record_name).suffix.lower() == ".csv"
 
-        if not is_image and not is_pdf and not is_text:
+        if not is_image and not is_pdf and not is_text and not is_csv:
             logger.debug(
                 "Skipping unsupported attachment type: %s (%s)", record_name, mime_type
             )
@@ -134,7 +163,7 @@ async def resolve_attachments(
                     exc_info=True,
                 )
 
-        elif is_pdf or is_text:
+        elif is_pdf or is_text or is_csv:
             if blob_store is None:
                 logger.warning(
                     "blob_store not available; cannot resolve attachment %s",
@@ -162,6 +191,15 @@ async def resolve_attachments(
 
                 if out_records is not None:
                     out_records[virtual_record_id] = record
+
+                await _capture_input_file(
+                    record=record,
+                    record_name=record_name,
+                    blob_store=blob_store,
+                    org_id=org_id,
+                    out_files=out_files,
+                    logger=logger,
+                )
 
                 doc_content, ref_mapper = record_to_message_content(
                     record, ref_mapper=ref_mapper, is_multimodal_llm=is_multimodal_llm

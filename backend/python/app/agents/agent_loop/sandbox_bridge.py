@@ -288,6 +288,9 @@ class PipesHubCodingSandboxTool(CodingSandboxTool):
     def description(self) -> str:
         return (
             super().description
+            + "\n\nUser-uploaded files for this request are staged read-only under "
+            "input/attachments/. Inspect that directory and compute from the actual files "
+            "instead of copying their contents into code. "
             + "\n\nTo reuse a previously generated artifact (a chart, CSV, or other file "
             "from an earlier call in this conversation) in this run, pass its name in "
             "input_artifacts — it will be staged at input/artifacts/<name>. Do not "
@@ -517,25 +520,30 @@ def coding_sandbox_artifact_staging(context: "AgentContext", *, inmemory_store: 
             await _capture_code_artifact(context, registry, ctx)
 
         refs = ctx.tool_input.get("input_artifacts")
+        attachment_files = context.tool_state.get("attachment_input_files") or {}
         has_registry = registry is not None and context.conversation_id
         has_inmemory = inmemory_store is not None
-        if not refs or (not has_registry and not has_inmemory):
+        if (not refs or (not has_registry and not has_inmemory)) and not attachment_files:
             logger.info(
                 "coding_sandbox_artifact_staging: no input_artifacts to stage "
                 "(refs=%s registry=%s inmemory=%s conversation_id=%s)",
                 bool(refs), registry is not None, has_inmemory, context.conversation_id,
             )
-            set_staged_input_files_for_task(None)
             await next_fn()
             return
 
         logger.info(
             "coding_sandbox_artifact_staging: resolving %d input_artifact ref(s): %s",
-            len(refs), refs,
+            len(refs or []), refs or [],
         )
-        files, resolved, missing = await _resolve_input_artifacts(
-            context, registry, refs, inmemory_store=inmemory_store,
-        )
+        files = dict(attachment_files)
+        resolved: list[dict[str, Any]] = []
+        missing: list[str] = []
+        if refs and (has_registry or has_inmemory):
+            artifact_files, resolved, missing = await _resolve_input_artifacts(
+                context, registry, refs, inmemory_store=inmemory_store,
+            )
+            files.update(artifact_files)
         logger.info(
             "coding_sandbox_artifact_staging: resolved %d artifact(s) (%s), "
             "missing %d ref(s) (%s), staging %d file(s) totalling %d bytes",
@@ -548,6 +556,8 @@ def coding_sandbox_artifact_staging(context: "AgentContext", *, inmemory_store: 
         )
         if resolved:
             ctx.metadata["staged_input_artifacts"] = resolved
+        if attachment_files:
+            ctx.metadata["staged_user_attachments"] = sorted(attachment_files)
         if missing:
             ctx.metadata["input_artifacts_not_found"] = missing
         set_staged_input_files_for_task(files)

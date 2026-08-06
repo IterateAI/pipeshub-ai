@@ -22,6 +22,7 @@ class TestAttachmentMimeHelpers:
         assert _is_supported_attachment_mime("text/plain") is True
         assert _is_supported_attachment_mime("text/markdown") is True
         assert _is_supported_attachment_mime("text/mdx") is True
+        assert _is_supported_attachment_mime("text/csv") is True
 
     def test_text_attachment_detection(self):
         from app.api.routes.chatbot import _is_text_attachment
@@ -50,6 +51,7 @@ class TestAttachmentMimeHelpers:
         assert _attachment_extension("x", "text/plain") == "txt"
         assert _attachment_extension("x", "text/markdown") == "md"
         assert _attachment_extension("x", "text/mdx") == "mdx"
+        assert _attachment_extension("x", "text/csv") == "csv"
         assert _attachment_extension("plain", "application/octet-stream") == "bin"
 
 
@@ -75,6 +77,21 @@ async def test_build_text_blocks_parses_markdown():
         getattr(b, "type", None) == "text" or (isinstance(b, dict) and b.get("type") == "text")
         for b in container.blocks
     )
+
+
+def test_build_csv_blocks_is_deterministic_and_location_aware():
+    from app.api.routes.chatbot import _build_csv_blocks
+
+    container = _build_csv_blocks(b"item,amount\nalpha,10\nbeta,20\n")
+
+    assert [block.data for block in container.blocks] == [
+        "CSV row 2: item=alpha, amount=10",
+        "CSV row 3: item=beta, amount=20",
+    ]
+    assert [block.citation_metadata.section_title for block in container.blocks] == [
+        "CSV row 2",
+        "CSV row 3",
+    ]
 
 
 @pytest.mark.parametrize("needs_ocr_per_page,len_pages,expect", [
@@ -1832,4 +1849,3 @@ async def test_revoke_invalid_payload_and_bad_user():
 
 
     assert out["revoked"] == 0
-

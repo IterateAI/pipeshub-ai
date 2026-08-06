@@ -863,6 +863,36 @@ class BlobStorage(Transformer):
             self.logger.error("❌ Failed to save binary to storage for record %s: %s", record_id, str(e))
             return None, None
 
+    async def get_binary_from_storage(self, document_id: str, org_id: str) -> bytes:
+        """Download an authenticated raw storage document as bytes."""
+        headers, nodejs_endpoint, _ = await self._get_auth_and_config(org_id)
+        buffer_url = (
+            f"{nodejs_endpoint}"
+            f"{Routes.STORAGE_BUFFER.value.format(documentId=document_id)}"
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(buffer_url, headers=headers) as response:
+                if response.status != HttpStatusCode.SUCCESS.value:
+                    detail = (await response.text())[:500]
+                    raise RuntimeError(
+                        f"Storage buffer download failed ({response.status}): {detail}"
+                    )
+                payload = await response.json(content_type=None)
+
+        def decode(value: Any) -> bytes:
+            if isinstance(value, (bytes, bytearray)):
+                return bytes(value)
+            if isinstance(value, list):
+                return bytes(value)
+            if isinstance(value, dict):
+                if value.get("type") == "Buffer" and isinstance(value.get("data"), list):
+                    return bytes(value["data"])
+                if "data" in value:
+                    return decode(value["data"])
+            raise RuntimeError("Storage returned an unrecognized buffer payload")
+
+        return decode(payload)
+
     async def get_document_id_by_virtual_record_id(self, virtual_record_id: str) -> dict | None:
         """
         Get the document ID(s) and file size by virtual record ID from ArangoDB.

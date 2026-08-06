@@ -410,6 +410,29 @@ class TestCodingSandboxArtifactStaging:
 
         assert peek_staged_input_files() is None
 
+    async def test_uploaded_attachments_stage_without_input_artifact_refs(
+        self, monkeypatch
+    ) -> None:
+        context = _make_context()
+        context.tool_state["attachment_input_files"] = {
+            "input/attachments/column-sum.csv": b"item,amount\na,10\nb,20\n"
+        }
+        registry = self._make_registry({})
+        monkeypatch.setattr(AgentContext, "artifact_registry", property(lambda self: registry))
+        ctx = ToolCallContext(
+            tool_path="/toolsets/coding_sandbox/run_code",
+            tool_input={"code": "print(1)"},
+        )
+
+        await coding_sandbox_artifact_staging(context)(ctx, _noop_next)
+
+        assert peek_staged_input_files() == {
+            "input/attachments/column-sum.csv": b"item,amount\na,10\nb,20\n"
+        }
+        assert ctx.metadata["staged_user_attachments"] == [
+            "input/attachments/column-sum.csv"
+        ]
+
     async def test_parallel_tool_calls_do_not_see_each_others_staged_files(self, monkeypatch) -> None:
         """Mirrors the real `asyncio.gather`-per-tool-call isolation the
         turn loop relies on (see `set_staged_input_files_for_task`'s

@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncGenerator
 import base64
+import csv
 import json
 import logging
 from pathlib import Path
@@ -158,6 +159,32 @@ async def _build_text_blocks(file_content: bytes) -> BlocksContainer:
     return await parser.parse_to_blocks(text.strip())
 
 
+def _build_csv_blocks(file_content: bytes) -> BlocksContainer:
+    """Parse a CSV attachment deterministically for grounded chat context."""
+    text = file_content.decode("utf-8-sig")
+    rows = list(csv.reader(text.splitlines()))
+    if not rows:
+        return BlocksContainer(blocks=[], block_groups=[])
+
+    headers = rows[0]
+    blocks: list[Block] = []
+    for row_number, row in enumerate(rows[1:], start=2):
+        values = [
+            f"{headers[index] if index < len(headers) else f'column_{index + 1}'}={value}"
+            for index, value in enumerate(row)
+        ]
+        blocks.append(
+            Block(
+                index=len(blocks),
+                type=BlockType.TEXT,
+                format=DataFormat.TXT,
+                data=f"CSV row {row_number}: " + ", ".join(values),
+                citation_metadata=CitationMetadata(section_title=f"CSV row {row_number}"),
+            )
+        )
+    return BlocksContainer(blocks=blocks, block_groups=[])
+
+
 # Dependency injection functions
 async def get_retrieval_service(request: Request) -> RetrievalService:
     container: QueryAppContainer = request.app.container
@@ -303,10 +330,13 @@ _SUPPORTED_ATTACHMENT_MIME_TYPES = {
     "text/plain",
     "text/markdown",
     "text/mdx",
+    "application/csv",
+    "text/csv",
 }
 
 _TEXT_ATTACHMENT_MIME_TYPES = {"text/plain", "text/markdown", "text/mdx"}
 _DOC_ATTACHMENT_MIME_TYPES = _TEXT_ATTACHMENT_MIME_TYPES | {"application/pdf"}
+_CSV_ATTACHMENT_MIME_TYPES = {"application/csv", "text/csv"}
 
 
 def _is_supported_attachment_mime(mime_type: str) -> bool:
@@ -338,6 +368,8 @@ def _attachment_extension(file_name: str, mime_type: str) -> str:
         return "md"
     if mime_lower == "text/mdx":
         return "mdx"
+    if mime_lower in _CSV_ATTACHMENT_MIME_TYPES:
+        return "csv"
     return "bin"
 
 
@@ -413,7 +445,7 @@ async def upload_chat_attachments(
         if not _is_supported_attachment_mime(item.mimeType):
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported attachment type '{item.mimeType}': {item.fileName}. Supported: PDF, JPEG, PNG, TXT, MD, MDX.",
+                detail=f"Unsupported attachment type '{item.mimeType}': {item.fileName}. Supported: PDF, JPEG, PNG, TXT, MD, MDX, CSV.",
             )
         if item.size <= 0:
             raise HTTPException(status_code=400, detail=f"Attachment size must be positive: {item.fileName}")
@@ -423,6 +455,7 @@ async def upload_chat_attachments(
         extension = _attachment_extension(item.fileName, item.mimeType)
         is_image = _is_image_attachment(item.mimeType)
         is_text = _is_text_attachment(item.mimeType)
+        is_csv = item.mimeType.lower() in _CSV_ATTACHMENT_MIME_TYPES or extension == "csv"
 
         try:
             file_binary = base64.b64decode(item.contentBase64, validate=True)
@@ -470,6 +503,15 @@ async def upload_chat_attachments(
                 parsed_blocks_by_record[record_id] = block_containers
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to process image attachment {item.fileName}: {str(e)}")
+        elif is_csv:
+            try:
+                block_containers = await asyncio.to_thread(_build_csv_blocks, file_binary)
+                parsed_blocks_by_record[record_id] = block_containers
+            except (UnicodeDecodeError, csv.Error) as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to parse CSV attachment {item.fileName}: {str(e)}",
+                )
         elif is_text:
             try:
                 block_containers = await _build_text_blocks(file_binary)

@@ -92,6 +92,7 @@ async def resolve_attachments_for_goal(
         state["citation_ref_mapper"] = ref_mapper
 
     attachment_records: dict[str, dict[str, Any]] = {}
+    attachment_input_files: dict[str, bytes] = {}
     try:
         blocks = await resolve_attachments(
             attachments=attachments,
@@ -101,6 +102,7 @@ async def resolve_attachments_for_goal(
             logger=log,
             ref_mapper=ref_mapper,
             out_records=attachment_records,
+            out_files=attachment_input_files,
         )
     except Exception as exc:
         log.warning("Failed to resolve attachments: %s", exc)
@@ -108,6 +110,7 @@ async def resolve_attachments_for_goal(
         return "", []
 
     _merge_records_into_state(state, attachment_records)
+    state["attachment_input_files"] = attachment_input_files
     state["resolved_attachment_blocks"] = blocks
 
     if not blocks:

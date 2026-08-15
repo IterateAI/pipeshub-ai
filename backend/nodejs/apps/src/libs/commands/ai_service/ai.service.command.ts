@@ -3,6 +3,7 @@ import { HttpMethod } from '../../enums/http-methods.enum';
 import { Logger } from '../../services/logger.service';
 import { BaseCommand } from '../command.interface';
 import { Readable } from 'stream';
+import axios from 'axios';
 
 export interface AICommandOptions {
   uri: string;
@@ -10,6 +11,7 @@ export interface AICommandOptions {
   headers?: Record<string, string>;
   queryParams?: Record<string, string | number | boolean>;
   body?: any;
+  timeoutMs?: number;
 }
 
 interface FetchCommandError extends Error {
@@ -28,11 +30,13 @@ const logger = Logger.getInstance({
 export class AIServiceCommand<T> extends BaseCommand<AIServiceResponse<T>> {
   private method: HttpMethod;
   private body?: any;
+  private timeoutMs?: number;
 
   constructor(options: AICommandOptions) {
     super(options.uri, options.queryParams, options.headers);
     this.method = options.method;
     this.body = this.sanitizeBody(options.body);
+    this.timeoutMs = options.timeoutMs;
     this.headers = this.sanitizeHeaders(options.headers!);
   }
   
@@ -47,6 +51,31 @@ export class AIServiceCommand<T> extends BaseCommand<AIServiceResponse<T>> {
     };
 
     try {
+      if (this.timeoutMs !== undefined) {
+        const response = await axios.request<T>({
+          url,
+          method: this.method,
+          headers: sanitizedHeaders,
+          data: this.body,
+          timeout: this.timeoutMs,
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+          validateStatus: () => true,
+        });
+
+        logger.info('AI service command success', {
+          url: url,
+          statusCode: response.status,
+          statusText: response.statusText,
+        });
+
+        return {
+          statusCode: response.status,
+          data: response.data,
+          msg: response.statusText,
+        };
+      }
+
       const response = await this.fetchWithRetry(
         async () => fetch(url, requestOptions),
         3,

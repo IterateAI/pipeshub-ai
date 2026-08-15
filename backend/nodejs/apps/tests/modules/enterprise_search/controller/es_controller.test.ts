@@ -11568,6 +11568,7 @@ describe('Enterprise Search Controller', () => {
       it('should POST attachment payload to the AI backend and return its JSON', async () => {
         sinon.stub(AIServiceCommand.prototype, 'execute').callsFake(function (this: any) {
           expect(this.uri).to.equal('http://localhost:8000/api/v1/chat/attachments/upload')
+          expect(this.timeoutMs).to.equal(45 * 60 * 1000)
           const payload = JSON.parse(this.body)
           expect(payload.conversationId).to.equal('507f1f77bcf86cd799439011')
           expect(payload.attachments).to.have.length(1)

@@ -97,6 +97,7 @@ import { Org } from '../../user_management/schema/org.schema';
 import { TokenScopes } from '../../../libs/enums/token-scopes.enum';
 const logger = Logger.getInstance({ service: 'Enterprise Search Service' });
 const rsAvailable = process.env.REPLICA_SET_AVAILABLE === 'true';
+const CHAT_ATTACHMENT_UPLOAD_TIMEOUT_MS = 45 * 60 * 1000;
 
 /** Remove `id` from graph document clones (Neo4j vs Arango shape) before returning search to the client. */
 function omitId<T>(doc: T): T {
@@ -678,6 +679,7 @@ export const uploadChatAttachments =
           'Content-Type': 'application/json',
         },
         body: aiPayload,
+        timeoutMs: CHAT_ATTACHMENT_UPLOAD_TIMEOUT_MS,
       };
 
       const aiServiceCommand = new AIServiceCommand(aiCommandOptions);
@@ -768,6 +770,7 @@ export const uploadChatAttachmentsInternal =
           'Content-Type': 'application/json',
         },
         body: aiPayload,
+        timeoutMs: CHAT_ATTACHMENT_UPLOAD_TIMEOUT_MS,
       };
 
       const aiServiceCommand = new AIServiceCommand(aiCommandOptions);

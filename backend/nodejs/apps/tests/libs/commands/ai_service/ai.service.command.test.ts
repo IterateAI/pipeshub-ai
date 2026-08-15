@@ -1,6 +1,7 @@
 import 'reflect-metadata'
 import { expect } from 'chai'
 import sinon from 'sinon'
+import axios from 'axios'
 import {
   AIServiceCommand,
   AICommandOptions,
@@ -57,6 +58,38 @@ describe('AIServiceCommand', () => {
   })
 
   describe('execute', () => {
+    it('should use axios when an explicit long-running timeout is configured', async () => {
+      const axiosStub = sinon.stub(axios, 'request').resolves({
+        status: 201,
+        statusText: 'Created',
+        data: { attachments: [{ recordId: 'record-1' }] },
+      })
+
+      const cmd = new AIServiceCommand({
+        uri: 'http://ai.local/chat/attachments/upload',
+        method: HttpMethod.POST,
+        headers: { authorization: 'Bearer tok' },
+        body: { attachments: [{ fileName: 'report.docx' }] },
+        timeoutMs: 45 * 60 * 1000,
+      })
+
+      const result = await cmd.execute()
+
+      expect(fetchStub.called).to.be.false
+      expect(axiosStub.calledOnce).to.be.true
+      expect(axiosStub.firstCall.args[0]).to.include({
+        url: 'http://ai.local/chat/attachments/upload',
+        timeout: 45 * 60 * 1000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      })
+      expect(result).to.deep.equal({
+        statusCode: 201,
+        data: { attachments: [{ recordId: 'record-1' }] },
+        msg: 'Created',
+      })
+    })
+
     it('should return AIServiceResponse with statusCode, data, and msg on success', async () => {
       const responseData = { answer: 'Hello, world!' }
       fetchStub.resolves(makeFetchResponse(200, responseData, 'OK'))

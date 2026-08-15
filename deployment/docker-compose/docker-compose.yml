@@ -183,6 +183,9 @@ services:
       # Inner ReAct graph; keep the framework default unless a clean-state retry
       # proves a task needs additional tool-call headroom.
       - REACT_AGENT_RECURSION_LIMIT=${REACT_AGENT_RECURSION_LIMIT:-50}
+      # Optional: keep sandbox tools bound during final response synthesis for
+      # grounded file/data tasks. Disabled by default for normal deployments.
+      - RESPOND_NODE_EXECUTION_TOOLS_ENABLED=${RESPOND_NODE_EXECUTION_TOOLS_ENABLED:-false}
 
       # Standalone parsing / extraction services (opt-in)
       - PARSING_SERVICE_URL=http://localhost:8092

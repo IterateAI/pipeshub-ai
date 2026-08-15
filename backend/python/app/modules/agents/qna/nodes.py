@@ -84,6 +84,12 @@ _REASONING_DISPLAY_LEN = 200
 
 _DEFAULT_REACT_AGENT_RECURSION_LIMIT = 50
 _MAX_REACT_AGENT_RECURSION_LIMIT = 200
+_RESPONSE_EXECUTION_TOOL_PREFIXES = (
+    "coding_sandbox_",
+    "coding_sandbox.",
+    "database_sandbox_",
+    "database_sandbox.",
+)
 
 
 def _get_react_agent_recursion_limit() -> int:
@@ -106,6 +112,41 @@ def _get_react_agent_recursion_limit() -> int:
         _DEFAULT_REACT_AGENT_RECURSION_LIMIT,
     )
     return _DEFAULT_REACT_AGENT_RECURSION_LIMIT
+
+
+def _get_response_execution_tools(
+    state: ChatState,
+    log: logging.Logger,
+) -> list[object]:
+    """Return opt-in sandbox tools needed to finish grounded file tasks."""
+    enabled = os.getenv("RESPOND_NODE_EXECUTION_TOOLS_ENABLED", "false").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return []
+    try:
+        from app.modules.agents.qna.tool_system import get_agent_tools_with_schemas
+
+        selected: list[object] = []
+        seen: set[str] = set()
+        for tool in get_agent_tools_with_schemas(state):
+            name = str(getattr(tool, "name", ""))
+            original_name = str(getattr(tool, "_original_name", name))
+            if not any(
+                candidate.startswith(_RESPONSE_EXECUTION_TOOL_PREFIXES)
+                for candidate in (name, original_name)
+            ):
+                continue
+            if name not in seen:
+                selected.append(tool)
+                seen.add(name)
+        if selected:
+            log.info(
+                "Opt-in response execution tools enabled: %s",
+                [getattr(tool, "name", "") for tool in selected],
+            )
+        return selected
+    except Exception as error:
+        log.warning("Failed to load opt-in response execution tools: %s", error)
+        return []
 
 # Orchestration status taxonomy (metadata fields on tool result dicts)
 ORCHESTRATION_STATUS_RESOLVED = "resolved"
@@ -6940,7 +6981,7 @@ async def respond_node(
         # Create the agent-specific fetch_full_record tool (mirrors the chatbot
         # pipeline: returns raw record dicts so execute_tool_calls in streaming.py
         # formats them via record_to_message_content() — identical to chatbot).
-        tools = []
+        tools = _get_response_execution_tools(state, log)
         if virtual_record_map:
             from app.utils.fetch_full_record import (
                 create_fetch_full_record_tool,
@@ -6951,7 +6992,7 @@ async def respond_node(
                 graph_provider=graph_provider,
                 user_id=user_id,
             )
-            tools = [fetch_tool]
+            tools.append(fetch_tool)
             log.debug(
                 f"Added agent fetch_full_record tool "
                 f"({len(virtual_record_map)} records available, "

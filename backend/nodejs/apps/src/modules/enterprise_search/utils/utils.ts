@@ -274,10 +274,26 @@ export const buildAIResponseMessage = (
     aiResponse.data.referenceData &&
     Array.isArray(aiResponse.data.referenceData)
   ) {
-    message.referenceData = aiResponse.data.referenceData.filter((item) => {
-      // Ensure item has name and at least one of key or id (id can be optional)
-      return item?.name;
-    });
+    message.referenceData = aiResponse.data.referenceData
+      .filter((item) => {
+        // Ensure item has name and at least one of key or id (id can be optional)
+        return item?.name;
+      })
+      .map((item) => ({
+        ...item,
+        ...(item.metadata && {
+          metadata: Object.fromEntries(
+            Object.entries(item.metadata)
+              .filter(([, value]) => value !== undefined)
+              .map(([key, value]) => [
+                key.replace(/[%.$\0]/g, (character) =>
+                  `%${character.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`,
+                ),
+                typeof value === 'string' ? value : JSON.stringify(value),
+              ]),
+          ),
+        }),
+      }));
   }
 
   // Present only when PIPESHUB_PERSIST_REASONING=true on the Python side

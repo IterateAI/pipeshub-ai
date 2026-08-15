@@ -180,6 +180,9 @@ services:
       # Code sandbox
       - SANDBOX_MODE=${SANDBOX_MODE:-docker}
       - SANDBOX_DOCKER_IMAGE=${SANDBOX_DOCKER_IMAGE:-pipeshubai/pipeshub-sandbox:${IMAGE_TAG:-latest}}
+      # Inner ReAct graph; keep the framework default unless a clean-state retry
+      # proves a task needs additional tool-call headroom.
+      - REACT_AGENT_RECURSION_LIMIT=${REACT_AGENT_RECURSION_LIMIT:-50}
 
       # Standalone parsing / extraction services (opt-in)
       - PARSING_SERVICE_URL=http://localhost:8092

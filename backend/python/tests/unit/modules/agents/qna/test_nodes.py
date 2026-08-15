@@ -7278,6 +7278,25 @@ class TestRespondNode:
 class TestReactAgentNode:
     """Tests for react_agent_node()."""
 
+    def test_recursion_limit_defaults_to_50(self, monkeypatch):
+        from app.modules.agents.qna.nodes import _get_react_agent_recursion_limit
+
+        monkeypatch.delenv("REACT_AGENT_RECURSION_LIMIT", raising=False)
+        assert _get_react_agent_recursion_limit() == 50
+
+    def test_recursion_limit_accepts_bounded_override(self, monkeypatch):
+        from app.modules.agents.qna.nodes import _get_react_agent_recursion_limit
+
+        monkeypatch.setenv("REACT_AGENT_RECURSION_LIMIT", "100")
+        assert _get_react_agent_recursion_limit() == 100
+
+    @pytest.mark.parametrize("value", ["0", "201", "invalid"])
+    def test_recursion_limit_rejects_unsafe_override(self, monkeypatch, value):
+        from app.modules.agents.qna.nodes import _get_react_agent_recursion_limit
+
+        monkeypatch.setenv("REACT_AGENT_RECURSION_LIMIT", value)
+        assert _get_react_agent_recursion_limit() == 50
+
     @pytest.fixture
     def base_state(self):
         return {

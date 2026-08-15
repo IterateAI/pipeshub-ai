@@ -82,6 +82,31 @@ _TOOL_LOG_LIMIT = 5
 _PARAM_DESC_TRUNCATE = 60
 _REASONING_DISPLAY_LEN = 200
 
+_DEFAULT_REACT_AGENT_RECURSION_LIMIT = 50
+_MAX_REACT_AGENT_RECURSION_LIMIT = 200
+
+
+def _get_react_agent_recursion_limit() -> int:
+    """Return a bounded runtime override for the inner ReAct graph."""
+    raw_value = os.getenv("REACT_AGENT_RECURSION_LIMIT")
+    if raw_value is None or not raw_value.strip():
+        return _DEFAULT_REACT_AGENT_RECURSION_LIMIT
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        value = 0
+
+    if 1 <= value <= _MAX_REACT_AGENT_RECURSION_LIMIT:
+        return value
+
+    logger.warning(
+        "Ignoring invalid REACT_AGENT_RECURSION_LIMIT=%r; using %s",
+        raw_value,
+        _DEFAULT_REACT_AGENT_RECURSION_LIMIT,
+    )
+    return _DEFAULT_REACT_AGENT_RECURSION_LIMIT
+
 # Orchestration status taxonomy (metadata fields on tool result dicts)
 ORCHESTRATION_STATUS_RESOLVED = "resolved"
 ORCHESTRATION_STATUS_PARTIAL = "partial_failure"
@@ -8228,7 +8253,7 @@ async def react_agent_node(
         if _opik_tracer:
             react_callbacks.append(_opik_tracer)
         agent_config = {
-            "recursion_limit": 50,
+            "recursion_limit": _get_react_agent_recursion_limit(),
             "callbacks": react_callbacks,
         }
 

@@ -251,10 +251,26 @@ export const buildAIResponseMessage = (
   // This stores technical IDs that were in the response for later reference
   // Filter out invalid items (must have name and at least key or id)
   if (aiResponse.data.referenceData && Array.isArray(aiResponse.data.referenceData)) {
-    message.referenceData = aiResponse.data.referenceData.filter((item) => {
-      // Ensure item has name and at least one of key or id (id can be optional)
-      return item && item.name;
-    });
+    message.referenceData = aiResponse.data.referenceData
+      .filter((item) => {
+        // Ensure item has name and at least one of key or id (id can be optional)
+        return item && item.name;
+      })
+      .map((item) => ({
+        ...item,
+        ...(item.metadata && {
+          metadata: Object.fromEntries(
+            Object.entries(item.metadata)
+              .filter(([, value]) => value !== undefined)
+              .map(([key, value]) => [
+                key.replace(/[%.$\0]/g, (character) =>
+                  `%${character.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`,
+                ),
+                typeof value === 'string' ? value : JSON.stringify(value),
+              ]),
+          ),
+        }),
+      }));
   }
 
   return message;

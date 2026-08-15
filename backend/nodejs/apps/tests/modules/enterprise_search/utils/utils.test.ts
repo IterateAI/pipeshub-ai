@@ -2155,6 +2155,18 @@ describe('Enterprise Search Utils - coverage', () => {
         'MI%2ED118': '6219831',
         '%24source': 'workbook',
       })
+
+      const conversation = new Conversation({
+        userId: new mongoose.Types.ObjectId(),
+        orgId: new mongoose.Types.ObjectId(),
+        initiator: new mongoose.Types.ObjectId(),
+        messages: [result],
+      })
+
+      expect(conversation.validateSync()).to.be.undefined
+      expect(
+        conversation.messages[0].referenceData?.[0].metadata?.get('MI%2ED118'),
+      ).to.equal('6219831')
     })
 
     it('should include modelInfo when provided', () => {

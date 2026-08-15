@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE=pipeshubai/pipeshub-ai:agentic-exec-compact-timeoutfix
+
+FROM node:20-slim AS nodejs-backend
+WORKDIR /app/backend
+
+COPY backend/nodejs/apps/package.json backend/nodejs/apps/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --ignore-scripts
+
+COPY backend/nodejs/apps/tsconfig.json ./
+COPY backend/nodejs/apps/src ./src
+RUN npm run build
+
+FROM ${BASE_IMAGE}
+ARG SOURCE_COMMIT=unknown
+
+LABEL org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      ai.iterate.pipeshub.runtime-overlay="production-retry-v1"
+
+COPY --from=nodejs-backend /app/backend/dist /app/backend/dist
+COPY backend/python/app /app/python/app

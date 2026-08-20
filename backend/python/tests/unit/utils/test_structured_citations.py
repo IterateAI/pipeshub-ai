@@ -33,6 +33,34 @@ def _record() -> dict:
     }
 
 
+def _pptx_record() -> dict:
+    return {
+        "id": "record-pptx",
+        "record_name": "slides.pptx",
+        "frontend_url": "https://app.example.com",
+        "block_containers": {
+            "blocks": [
+                {
+                    "index": 16,
+                    "data": "Benefits of using GitHub",
+                    "citation_metadata": {"slide_number": 4},
+                },
+                {
+                    "index": 17,
+                    "data": "You can report bugs/issues you find using GitHub.",
+                    "citation_metadata": {"slide_number": 4},
+                },
+                {
+                    "index": 18,
+                    "data": "Questions",
+                    "citation_metadata": {"slide_number": 5},
+                },
+            ],
+            "block_groups": [],
+        },
+    }
+
+
 def test_resolves_csv_rows_to_real_refs() -> None:
     mapper = MagicMock()
     mapper.get_or_create_ref.side_effect = ["ref1", "ref2"]
@@ -71,6 +99,25 @@ def test_unresolved_location_does_not_allocate_ref() -> None:
     assert result["ok"] is False
     assert result["unresolved_locations"] == [{"csv_row": 99999}]
     mapper.get_or_create_ref.assert_not_called()
+
+
+def test_slide_location_returns_every_parsed_block_on_slide() -> None:
+    mapper = MagicMock()
+    mapper.get_or_create_ref.side_effect = ["ref1", "ref2"]
+
+    result = resolve_structured_citations(
+        record_id="record-pptx",
+        locations=[StructuredCitationLocation(slide_number=4)],
+        virtual_record_id_to_result={"vr-1": _pptx_record()},
+        ref_mapper=mapper,
+    )
+
+    assert result["ok"] is True
+    assert [item["block_index"] for item in result["citations"]] == [16, 17]
+    assert [item["citation_markdown"] for item in result["citations"]] == [
+        "[source](ref1)",
+        "[source](ref2)",
+    ]
 
 
 def test_single_excel_cell_matches_parsed_row_range() -> None:

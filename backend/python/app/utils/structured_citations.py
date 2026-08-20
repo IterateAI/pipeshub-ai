@@ -184,26 +184,26 @@ def resolve_structured_citations(
     seen_blocks: set[int] = set()
 
     for requested in locations:
-        match = next(
-            (entry for entry in entries if _location_matches(requested, entry)),
-            None,
-        )
-        if match is None:
+        matches = [
+            entry for entry in entries if _location_matches(requested, entry)
+        ]
+        if not matches:
             unresolved.append(requested.model_dump(exclude_none=True))
             continue
-        if match["block_index"] in seen_blocks:
-            continue
-        seen_blocks.add(match["block_index"])
-        citation_id = ref_mapper.get_or_create_ref(match["block_url"])
-        citations.append(
-            {
-                "citation_id": citation_id,
-                "citation_markdown": f"[source]({citation_id})",
-                "location": match["location"],
-                "block_index": match["block_index"],
-                "content_preview": match["rendered_data"][:500],
-            }
-        )
+        for match in matches:
+            if match["block_index"] in seen_blocks:
+                continue
+            seen_blocks.add(match["block_index"])
+            citation_id = ref_mapper.get_or_create_ref(match["block_url"])
+            citations.append(
+                {
+                    "citation_id": citation_id,
+                    "citation_markdown": f"[source]({citation_id})",
+                    "location": match["location"],
+                    "block_index": match["block_index"],
+                    "content_preview": match["rendered_data"][:500],
+                }
+            )
 
     if not citations:
         return {

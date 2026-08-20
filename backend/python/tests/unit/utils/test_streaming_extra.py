@@ -1294,6 +1294,40 @@ class TestExecuteSingleToolBranches:
         assert result["tool_name"] == "search"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload", "expected_ok"),
+        [
+            ('{"success": true, "message": "Code executed successfully"}', True),
+            ('{"success": false, "error": "Code execution failed"}', False),
+        ],
+    )
+    async def test_structured_tool_success_field_normalized(
+        self,
+        payload: str,
+        expected_ok: bool,
+    ) -> None:
+        """StructuredTool JSON uses success; streaming must expose the same status as ok."""
+        from app.utils.streaming import execute_single_tool
+
+        mock_tool = AsyncMock()
+        mock_tool.name = "coding_sandbox_execute_python"
+        mock_tool.arun = AsyncMock(return_value=payload)
+
+        result = await execute_single_tool(
+            args={"code": "print('ok')"},
+            tool=mock_tool,
+            tool_name="coding_sandbox_execute_python",
+            call_id="sandbox-1",
+            valid_tool_names=["coding_sandbox_execute_python"],
+            tool_runtime_kwargs={},
+        )
+
+        assert result["ok"] is expected_ok
+        assert result["success"] is expected_ok
+        assert result["tool_name"] == "coding_sandbox_execute_python"
+        assert result["call_id"] == "sandbox-1"
+
+    @pytest.mark.asyncio
     async def test_tool_arun_exception_returns_error_dict(self) -> None:
         """Lines 444-456: arun raises → error dict with ok=False."""
         from app.utils.streaming import execute_single_tool

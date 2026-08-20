@@ -440,6 +440,15 @@ async def execute_single_tool(args, tool, tool_name, call_id, valid_tool_names, 
                 tool_result = {"ok": True, "content": tool_result, "result_type": "content"}
         if not isinstance(tool_result, dict):
             tool_result = {"ok": True, "content": tool_result, "result_type": "content"}
+        elif "ok" not in tool_result:
+            # StructuredTool flattens the registry's (success, payload) tuple
+            # into JSON with a top-level ``success`` field. Normalize that
+            # contract before the streaming loop classifies and formats it.
+            success = tool_result.get("success")
+            if isinstance(success, bool):
+                tool_result["ok"] = success
+            else:
+                tool_result["ok"] = "error" not in tool_result
         tool_result["tool_name"] = tool_name
         tool_result["call_id"] = call_id
         return tool_result

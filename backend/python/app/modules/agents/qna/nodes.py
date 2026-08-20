@@ -6997,6 +6997,21 @@ async def respond_node(
                 f"Added agent fetch_full_record tool "
                 f"({len(virtual_record_map)} records available, "
             )
+            ref_mapper = state.get("citation_ref_mapper")
+            if ref_mapper is not None:
+                from app.utils.structured_citations import (
+                    create_resolve_structured_citations_tool,
+                )
+
+                tools.append(
+                    create_resolve_structured_citations_tool(
+                        virtual_record_map,
+                        ref_mapper,
+                    )
+                )
+                log.debug(
+                    "Added resolve_structured_citations tool for oversized attachments"
+                )
 
         # Add web tools when agent has web search configured in the builder
         has_web_search_tool = False
@@ -8247,6 +8262,11 @@ async def react_agent_node(
             "data": {"status": "planning", "message": "Analyzing your request and planning actions..."}
         }, config)
 
+        # Resolve attachments before loading dynamic tools. Oversized structured
+        # attachments populate virtual_record_id_to_result, which is required to
+        # bind the exact-location citation resolver into this ReAct turn.
+        attachment_blocks = await _ensure_attachment_blocks(state, log)
+
         # Get tools with Pydantic schemas
         tools = get_agent_tools_with_schemas(state)
         log.info(f"ReAct agent loaded {len(tools)} tools with schemas")
@@ -8272,9 +8292,7 @@ async def react_agent_node(
         # provided in previous turns.
         messages = await _build_planner_messages(state, query, log)
 
-        # Resolve attachments (react graph entry point — planner_node does not run here)
-        # and inject into the query message so the LLM has full visual context.
-        attachment_blocks = await _ensure_attachment_blocks(state, log)
+        # Inject the already-resolved attachments into the query message.
         _inject_attachment_blocks(messages, attachment_blocks)
 
         # Execute agent with callback-based streaming.

@@ -890,6 +890,28 @@ def get_agent_tools_with_schemas(state: ChatState) -> list:
                 if state_logger:
                     state_logger.warning(f"Failed to add agent fetch_full_record tool: {e}")
 
+            ref_mapper = state.get("citation_ref_mapper")
+            if ref_mapper is not None:
+                try:
+                    from app.utils.structured_citations import (
+                        create_resolve_structured_citations_tool,
+                    )
+
+                    citation_tool = create_resolve_structured_citations_tool(
+                        virtual_record_map,
+                        ref_mapper,
+                    )
+                    structured_tools.append(citation_tool)
+                    if state_logger:
+                        state_logger.debug(
+                            "Added resolve_structured_citations tool for oversized attachments"
+                        )
+                except Exception as e:
+                    if state_logger:
+                        state_logger.warning(
+                            f"Failed to add resolve_structured_citations tool: {e}"
+                        )
+
         config_service = state.get("config_service")
         if config_service and state.get("has_sql_connector") and state.get("has_sql_knowledge"):
             try:

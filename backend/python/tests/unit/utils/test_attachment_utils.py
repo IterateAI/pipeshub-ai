@@ -563,7 +563,10 @@ class TestResolveAttachments:
 
         assert "access='sandbox'" in result[0]["text"]
         assert "INPUT_DIR" in result[0]["text"]
+        assert "Record ID: record-1" in result[0]["text"]
+        assert "resolve_structured_citations" in result[0]["text"]
         assert "x" * 100 not in result[0]["text"]
+        mapper.get_or_create_ref.assert_not_called()
 
     async def test_multiple_attachments_processed(self, logger):
         blob = AsyncMock()

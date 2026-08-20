@@ -43,7 +43,64 @@ def structured_record_to_message_content(
     ref_mapper: Any,
 ) -> list[dict[str, Any]]:
     """Render structured attachment blocks with stable, location-aware citations."""
-    from app.utils.chat_helpers import build_block_web_url  # noqa: PLC0415
+    entries = structured_record_block_entries(record, extension)
+    record_id = str(
+        record.get("id") or record.get("record_id") or record.get("_key") or ""
+    )
+    record_name = str(record.get("record_name") or "structured attachment")
+    normalized_extension = extension.lower().lstrip(".")
+    preview_lines = [f"<record name={record_name!r} format={normalized_extension!r}>"]
+    rendered_headers: set[str] = set()
+    for entry in entries:
+        group_header = entry.get("group_header")
+        if group_header and group_header not in rendered_headers:
+            preview_lines.append(group_header)
+            rendered_headers.add(group_header)
+        preview_lines.append(
+            f"- [ref000000] {entry['location']}: {entry['rendered_data']}"
+        )
+    preview_lines.append("</record>")
+    preview_rendered = "\n".join(preview_lines)
+    inline_limit = structured_attachment_inline_limit()
+    if inline_limit and len(preview_rendered) > inline_limit:
+        rendered = (
+            f"<record name={record_name!r} format={normalized_extension!r} "
+            "access='sandbox'>\n"
+            f"Record ID: {record_id}\n"
+            f"The parsed attachment is too large to inline ({len(preview_rendered)} characters). "
+            f"The original file is available read-only as {Path(record_name).name!r} "
+            "under os.environ['INPUT_DIR'] in the coding sandbox. Use Python or "
+            "read-only SQL to inspect the file and compute the answer. Do not infer "
+            "values from memory. After finding the exact worksheet/cells, CSV rows, "
+            "slides, or document blocks that support the answer, call "
+            "resolve_structured_citations with this exact Record ID and those locations. "
+            "Use the citation_markdown values returned by that tool exactly; never invent "
+            "a Citation ID.\n"
+            "</record>"
+        )
+        return [{"type": "text", "text": rendered}]
+
+    lines = [f"<record name={record_name!r} format={normalized_extension!r}>"]
+    rendered_headers.clear()
+    for entry in entries:
+        group_header = entry.get("group_header")
+        if group_header and group_header not in rendered_headers:
+            lines.append(group_header)
+            rendered_headers.add(group_header)
+        citation_ref = ref_mapper.get_or_create_ref(entry["block_url"])
+        lines.append(
+            f"- [{citation_ref}] {entry['location']}: {entry['rendered_data']}"
+        )
+    lines.append("</record>")
+    return [{"type": "text", "text": "\n".join(lines)}]
+
+
+def structured_record_block_entries(
+    record: dict[str, Any],
+    extension: str,
+) -> list[dict[str, Any]]:
+    """Return source-native block locations without allocating citation refs."""
+    from app.utils.chat_helpers import build_block_web_url
 
     block_container = record.get("block_containers") or {}
     blocks = block_container.get("blocks") or []
@@ -51,12 +108,12 @@ def structured_record_to_message_content(
     groups_by_index = {
         group.get("index"): group for group in block_groups if isinstance(group, dict)
     }
-    record_id = str(record.get("id") or "")
+    record_id = str(
+        record.get("id") or record.get("record_id") or record.get("_key") or ""
+    )
     frontend_url = str(record.get("frontend_url") or "")
-    record_name = str(record.get("record_name") or "structured attachment")
     normalized_extension = extension.lower().lstrip(".")
-    lines = [f"<record name={record_name!r} format={normalized_extension!r}>"]
-    rendered_group_headers: set[int] = set()
+    entries: list[dict[str, Any]] = []
 
     for block in blocks:
         if not isinstance(block, dict) or block.get("parent_block_index") is not None:
@@ -66,35 +123,40 @@ def structured_record_to_message_content(
         citation = block.get("citation_metadata") or {}
         parent_index = block.get("parent_index")
         group_data = (groups_by_index.get(parent_index) or {}).get("data") or {}
-        if parent_index is not None and parent_index not in rendered_group_headers:
-            headers = group_data.get("column_headers") or []
-            if headers:
-                sheet_name = group_data.get("sheet_name")
-                prefix = f"Sheet {sheet_name}: " if sheet_name else ""
-                lines.append(prefix + "Columns: " + " | ".join(map(str, headers)))
-            rendered_group_headers.add(parent_index)
-
+        column_headers = group_data.get("column_headers") or []
+        group_sheet_name = group_data.get("sheet_name")
+        group_header = None
+        if column_headers:
+            prefix = f"Sheet {group_sheet_name}: " if group_sheet_name else ""
+            group_header = prefix + "Columns: " + " | ".join(
+                map(str, column_headers)
+            )
         location_parts: list[str] = []
+        csv_row = None
+        sheet_name = None
+        cell_reference = None
+        worksheet_row = None
+        slide_number = None
         if normalized_extension == "csv":
-            row_number = citation.get("row_number") or (
+            csv_row = citation.get("row_number") or (
                 data.get("row_number") if isinstance(data, dict) else None
             )
-            if row_number is not None:
-                location_parts.append(f"CSV row {row_number}")
+            if csv_row is not None:
+                location_parts.append(f"CSV row {csv_row}")
         elif normalized_extension in {"xls", "xlsx"}:
             sheet_name = citation.get("sheet_name") or (
                 data.get("sheet_name") if isinstance(data, dict) else None
-            )
+            ) or group_data.get("sheet_name")
             cell_reference = citation.get("cell_reference")
-            row_number = citation.get("row_number") or (
+            worksheet_row = citation.get("row_number") or (
                 data.get("row_number") if isinstance(data, dict) else None
             )
             if sheet_name:
                 location_parts.append(f"sheet {sheet_name}")
             if cell_reference:
                 location_parts.append(str(cell_reference))
-            elif row_number is not None:
-                location_parts.append(f"row {row_number}")
+            elif worksheet_row is not None:
+                location_parts.append(f"row {worksheet_row}")
         elif normalized_extension in {"ppt", "pptx"}:
             slide_number = citation.get("slide_number") or citation.get("page_number")
             if slide_number is not None:
@@ -112,26 +174,26 @@ def structured_record_to_message_content(
         if not rendered_data:
             continue
         block_url = build_block_web_url(frontend_url, record_id, block_index)
-        citation_ref = ref_mapper.get_or_create_ref(block_url)
         location = ", ".join(location_parts) or f"block {block_index}"
-        lines.append(f"- [{citation_ref}] {location}: {rendered_data}")
-
-    lines.append("</record>")
-    rendered = "\n".join(lines)
-    inline_limit = structured_attachment_inline_limit()
-    if inline_limit and len(rendered) > inline_limit:
-        rendered = (
-            f"<record name={record_name!r} format={normalized_extension!r} "
-            "access='sandbox'>\n"
-            f"The parsed attachment is too large to inline ({len(rendered)} characters). "
-            f"The original file is available read-only as {Path(record_name).name!r} "
-            "under os.environ['INPUT_DIR'] in the coding sandbox. Use Python or "
-            "read-only SQL to inspect the file and compute the answer. Do not infer "
-            "values from memory. Cite the exact worksheet/cells, CSV rows/columns, "
-            "slides, or SQL query used.\n"
-            "</record>"
+        entries.append(
+            {
+                "block_index": block_index,
+                "block_url": block_url,
+                "location": location,
+                "rendered_data": rendered_data,
+                "group_header": group_header,
+                "csv_row": int(csv_row) if csv_row is not None else None,
+                "sheet_name": str(sheet_name) if sheet_name else None,
+                "cell_reference": str(cell_reference) if cell_reference else None,
+                "worksheet_row": (
+                    int(worksheet_row) if worksheet_row is not None else None
+                ),
+                "slide_number": (
+                    int(slide_number) if slide_number is not None else None
+                ),
+            }
         )
-    return [{"type": "text", "text": rendered}]
+    return entries
 
 
 async def _capture_input_file(

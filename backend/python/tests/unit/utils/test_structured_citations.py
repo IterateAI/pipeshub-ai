@@ -20,12 +20,18 @@ def _record() -> dict:
             "blocks": [
                 {
                     "index": 7,
-                    "data": {"row_number": 10196, "row_values": ["27", "33324/", 87718]},
+                    "data": {
+                        "row_number": 10196,
+                        "row_values": ["27", "33324/", 87718],
+                    },
                     "citation_metadata": {"row_number": 10196},
                 },
                 {
                     "index": 8,
-                    "data": {"row_number": 21216, "row_values": ["55", "311942", 30795]},
+                    "data": {
+                        "row_number": 21216,
+                        "row_values": ["55", "311942", 30795],
+                    },
                     "citation_metadata": {"row_number": 21216},
                 },
             ],
@@ -90,6 +96,30 @@ def _sqlite_bytes(tmp_path) -> bytes:
         connection.execute(
             "INSERT INTO cells (label, row_index, value) VALUES (?, ?, ?)",
             ("alpha", 53, "891456"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return database.read_bytes()
+
+
+def _normalized_sqlite_bytes(tmp_path) -> bytes:
+    database = tmp_path / "normalized.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            'CREATE TABLE records (row_index INTEGER PRIMARY KEY, "c001" TEXT, "c007" TEXT)'
+        )
+        connection.execute(
+            "CREATE TABLE source_schema (column_index INTEGER PRIMARY KEY, source_header TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO source_schema (column_index, source_header) VALUES (?, ?)",
+            [(1, "uscode"), (7, "qp1")],
+        )
+        connection.execute(
+            'INSERT INTO records (row_index, "c001", "c007") VALUES (?, ?, ?)',
+            (2556, "98", "6433"),
         )
         connection.commit()
     finally:
@@ -220,6 +250,64 @@ def test_resolves_sqlite_value_by_exact_filters_and_virtual_record_id(tmp_path) 
     metadata = record["block_containers"]["blocks"][1]["citation_metadata"]
     assert metadata["sqlite_rowid"] == 1
     assert metadata["sqlite_filters"] == {"label": "alpha", "row_index": 53}
+
+
+def test_resolves_sqlite_filename_and_source_header_aliases(tmp_path) -> None:
+    mapper = MagicMock()
+    mapper.get_or_create_ref.return_value = "ref-normalized"
+    record = _sqlite_record()
+    record["record_name"] = "normalized.sqlite"
+
+    result = resolve_structured_citations(
+        record_id="normalized.sqlite",
+        locations=[
+            StructuredCitationLocation(
+                sqlite_table="records",
+                sqlite_column="qp1",
+                sqlite_filters={"row_index": 2556, "uscode": "98"},
+            )
+        ],
+        virtual_record_id_to_result={"vr-normalized": record},
+        ref_mapper=mapper,
+        attachment_input_files={
+            "normalized.sqlite": _normalized_sqlite_bytes(tmp_path)
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["citations"][0]["content_preview"].endswith("column qp1: 6433")
+    metadata = record["block_containers"]["blocks"][1]["citation_metadata"]
+    assert metadata["sqlite_column"] == "qp1"
+    assert metadata["sqlite_physical_column"] == "c007"
+    assert metadata["sqlite_physical_filters"] == {
+        "row_index": 2556,
+        "c001": "98",
+    }
+
+
+def test_sqlite_filename_resolution_rejects_ambiguous_records(tmp_path) -> None:
+    mapper = MagicMock()
+    first = _sqlite_record()
+    second = _sqlite_record()
+    second["id"] = "record-sqlite-2"
+
+    result = resolve_structured_citations(
+        record_id="metrics.sqlite",
+        locations=[
+            StructuredCitationLocation(
+                sqlite_table="cells",
+                sqlite_rowid=1,
+                sqlite_column="value",
+            )
+        ],
+        virtual_record_id_to_result={"vr-1": first, "vr-2": second},
+        ref_mapper=mapper,
+        attachment_input_files={"metrics.sqlite": _sqlite_bytes(tmp_path)},
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "Record ID is not available in this conversation."
+    mapper.get_or_create_ref.assert_not_called()
 
 
 def test_sqlite_resolution_rejects_unknown_column(tmp_path) -> None:

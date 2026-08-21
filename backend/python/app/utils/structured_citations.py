@@ -110,10 +110,9 @@ def _cell_reference_matches(requested: str, available: str) -> bool:
     start_row = int(available_range.group(2))
     end_col = _column_number(available_range.group(3))
     end_row = int(available_range.group(4))
-    return (
-        min(start_col, end_col) <= requested_col <= max(start_col, end_col)
-        and min(start_row, end_row) <= requested_row <= max(start_row, end_row)
-    )
+    return min(start_col, end_col) <= requested_col <= max(start_col, end_col) and min(
+        start_row, end_row
+    ) <= requested_row <= max(start_row, end_row)
 
 
 def _location_matches(
@@ -150,7 +149,9 @@ def _location_matches(
             return False
     if requested.sqlite_table is not None:
         supplied = True
-        if (entry.get("sqlite_table") or "").casefold() != requested.sqlite_table.casefold():
+        if (
+            entry.get("sqlite_table") or ""
+        ).casefold() != requested.sqlite_table.casefold():
             return False
     if requested.sqlite_rowid is not None:
         supplied = True
@@ -158,7 +159,9 @@ def _location_matches(
             return False
     if requested.sqlite_column is not None:
         supplied = True
-        if (entry.get("sqlite_column") or "").casefold() != requested.sqlite_column.casefold():
+        if (
+            entry.get("sqlite_column") or ""
+        ).casefold() != requested.sqlite_column.casefold():
             return False
     if requested.sqlite_filters:
         supplied = True
@@ -202,6 +205,46 @@ def _attachment_bytes(
     )
 
 
+def _sqlite_columns(
+    connection: sqlite3.Connection,
+    table: str,
+) -> dict[str, str]:
+    return {
+        str(row[1]).casefold(): str(row[1])
+        for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+    }
+
+
+def _sqlite_source_aliases(
+    connection: sqlite3.Connection,
+    columns: dict[str, str],
+) -> dict[str, str]:
+    """Map source headers to cNNN columns in normalized structured databases."""
+    schema_columns = _sqlite_columns(connection, "source_schema")
+    if not {"column_index", "source_header"}.issubset(schema_columns):
+        return {}
+    aliases: dict[str, str] = {}
+    rows = connection.execute(
+        'SELECT "column_index", "source_header" FROM "source_schema"'
+    ).fetchall()
+    for column_index, source_header in rows:
+        if source_header is None:
+            continue
+        physical_name = f"c{int(column_index):03d}"
+        physical_column = columns.get(physical_name.casefold())
+        if physical_column:
+            aliases.setdefault(str(source_header).casefold(), physical_column)
+    return aliases
+
+
+def _sqlite_column_name(
+    requested: str,
+    columns: dict[str, str],
+    aliases: dict[str, str],
+) -> str | None:
+    return columns.get(requested.casefold()) or aliases.get(requested.casefold())
+
+
 def _add_sqlite_value_blocks(
     record: dict[str, Any],
     locations: list[StructuredCitationLocation],
@@ -226,22 +269,36 @@ def _add_sqlite_value_blocks(
     blocks = block_container.setdefault("blocks", [])
     existing = {
         (
-            str((block.get("citation_metadata") or {}).get("sqlite_table") or "").casefold(),
+            str(
+                (block.get("citation_metadata") or {}).get("sqlite_table") or ""
+            ).casefold(),
             (block.get("citation_metadata") or {}).get("sqlite_rowid"),
-            str((block.get("citation_metadata") or {}).get("sqlite_column") or "").casefold(),
+            str(
+                (block.get("citation_metadata") or {}).get("sqlite_column") or ""
+            ).casefold(),
             tuple(
                 sorted(
-                    ((block.get("citation_metadata") or {}).get("sqlite_filters") or {}).items()
+                    (
+                        (block.get("citation_metadata") or {}).get("sqlite_filters")
+                        or {}
+                    ).items()
                 )
             ),
         )
         for block in blocks
         if isinstance(block, dict)
     }
-    next_index = max(
-        (int(block.get("index") or 0) for block in blocks if isinstance(block, dict)),
-        default=-1,
-    ) + 1
+    next_index = (
+        max(
+            (
+                int(block.get("index") or 0)
+                for block in blocks
+                if isinstance(block, dict)
+            ),
+            default=-1,
+        )
+        + 1
+    )
     with tempfile.NamedTemporaryFile(suffix=".sqlite") as temporary:
         temporary.write(raw_database)
         temporary.flush()
@@ -249,27 +306,38 @@ def _add_sqlite_value_blocks(
         try:
             for location in requested:
                 table = str(location.sqlite_table)
-                column = str(location.sqlite_column)
-                if not _SQLITE_IDENTIFIER_RE.fullmatch(table) or not _SQLITE_IDENTIFIER_RE.fullmatch(column):
+                requested_column = str(location.sqlite_column)
+                if not _SQLITE_IDENTIFIER_RE.fullmatch(
+                    table
+                ) or not _SQLITE_IDENTIFIER_RE.fullmatch(requested_column):
                     continue
-                columns = {
-                    str(row[1]).casefold()
-                    for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
-                }
-                if column.casefold() not in columns:
+                columns = _sqlite_columns(connection, table)
+                aliases = _sqlite_source_aliases(connection, columns)
+                column = _sqlite_column_name(requested_column, columns, aliases)
+                if column is None:
                     continue
 
                 filters = location.sqlite_filters or {}
+                resolved_filters: dict[str, Any] = {}
                 if filters:
-                    if any(
-                        not _SQLITE_IDENTIFIER_RE.fullmatch(filter_column)
-                        or filter_column.casefold() not in columns
-                        for filter_column in filters
-                    ):
+                    for filter_column, filter_value in filters.items():
+                        if not _SQLITE_IDENTIFIER_RE.fullmatch(filter_column):
+                            resolved_filters = {}
+                            break
+                        resolved_column = _sqlite_column_name(
+                            filter_column,
+                            columns,
+                            aliases,
+                        )
+                        if resolved_column is None:
+                            resolved_filters = {}
+                            break
+                        resolved_filters[resolved_column] = filter_value
+                    if len(resolved_filters) != len(filters):
                         continue
                     predicates: list[str] = []
                     parameters: list[Any] = []
-                    for filter_column, filter_value in filters.items():
+                    for filter_column, filter_value in resolved_filters.items():
                         if filter_value is None:
                             predicates.append(f'"{filter_column}" IS NULL')
                         else:
@@ -277,7 +345,7 @@ def _add_sqlite_value_blocks(
                             parameters.append(filter_value)
                     rows = connection.execute(
                         f'SELECT rowid, "{column}" FROM "{table}" '
-                        f'WHERE {" AND ".join(predicates)} LIMIT 2',
+                        f"WHERE {' AND '.join(predicates)} LIMIT 2",
                         parameters,
                     ).fetchall()
                 else:
@@ -292,7 +360,7 @@ def _add_sqlite_value_blocks(
                 key = (
                     table.casefold(),
                     location.sqlite_rowid,
-                    column.casefold(),
+                    requested_column.casefold(),
                     tuple(sorted(filters.items())),
                 )
                 if key in existing:
@@ -304,14 +372,16 @@ def _add_sqlite_value_blocks(
                         "format": "txt",
                         "data": (
                             f"SQLite table {table}, rowid {location.sqlite_rowid}, "
-                            f"column {column}: {value}"
+                            f"column {requested_column}: {value}"
                         ),
                         "citation_metadata": {
                             "section_title": f"SQLite row: {table} rowid {location.sqlite_rowid}",
                             "sqlite_table": table,
                             "sqlite_rowid": location.sqlite_rowid,
-                            "sqlite_column": column,
+                            "sqlite_column": requested_column,
                             "sqlite_filters": filters,
+                            "sqlite_physical_column": column,
+                            "sqlite_physical_filters": resolved_filters,
                         },
                     }
                 )
@@ -335,21 +405,35 @@ def resolve_structured_citations(
         else StructuredCitationLocation.model_validate(location)
         for location in locations
     ]
-    record = next(
-        (
+    records = [
+        (str(virtual_record_id), candidate)
+        for virtual_record_id, candidate in virtual_record_id_to_result.items()
+        if isinstance(candidate, dict)
+    ]
+    exact_matches = [
+        candidate
+        for virtual_record_id, candidate in records
+        if record_id
+        in {
+            virtual_record_id,
+            str(candidate.get("id") or ""),
+            str(candidate.get("record_id") or ""),
+            str(candidate.get("_key") or ""),
+        }
+    ]
+    record = exact_matches[0] if len(exact_matches) == 1 else None
+    if record is None:
+        requested_name = Path(record_id).name.casefold()
+        name_matches = [
             candidate
-            for virtual_record_id, candidate in virtual_record_id_to_result.items()
-            if isinstance(candidate, dict)
-            and record_id
-            in {
-                str(virtual_record_id),
-                str(candidate.get("id") or ""),
-                str(candidate.get("record_id") or ""),
-                str(candidate.get("_key") or ""),
-            }
-        ),
-        None,
-    )
+            for _, candidate in records
+            if requested_name
+            and requested_name
+            == Path(
+                str(candidate.get("record_name") or candidate.get("recordName") or "")
+            ).name.casefold()
+        ]
+        record = name_matches[0] if len(name_matches) == 1 else None
     if record is None:
         return {
             "ok": False,
@@ -369,9 +453,7 @@ def resolve_structured_citations(
     seen_blocks: set[int] = set()
 
     for requested in locations:
-        matches = [
-            entry for entry in entries if _location_matches(requested, entry)
-        ]
+        matches = [entry for entry in entries if _location_matches(requested, entry)]
         if not matches:
             unresolved.append(requested.model_dump(exclude_none=True))
             continue

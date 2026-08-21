@@ -35,6 +35,7 @@ from app.modules.agents.deep.sub_agent import (
     _extract_tool_results,
     _format_tools_for_prompt,
     _make_budgeted_coro,
+    _needs_structured_citation_repair,
     _SubAgentStreamingCallback,
     _ToolCallBudget,
     _wrap_tools_with_budget,
@@ -49,6 +50,7 @@ from app.modules.agents.deep.sub_agent import (
     _extract_tool_results,
     _format_tools_for_prompt,
     _make_budgeted_coro,
+    _needs_structured_citation_repair,
     _prewarm_clients,
     _SubAgentStreamingCallback,
     _ToolCallBudget,
@@ -90,6 +92,119 @@ def _mock_state(**overrides: Any) -> dict:
     }
     state.update(overrides)
     return state
+
+
+class TestStructuredCitationRepair:
+    def _tool(self, name: str) -> MagicMock:
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    def test_requires_repair_when_citation_was_requested_but_not_resolved(self):
+        task = {"description": "Return the result and cite the inspected locations."}
+        state = _mock_state(query="Compute the exact total.")
+        tools = [self._tool("resolve_structured_citations")]
+
+        assert _needs_structured_citation_repair(
+            task, state, tools, [AIMessage(content="The total is 42.")],
+        )
+
+    def test_does_not_repair_when_citations_were_not_requested(self):
+        task = {"description": "Return the exact result."}
+        state = _mock_state(query="Compute the total.")
+        tools = [self._tool("resolve_structured_citations")]
+
+        assert not _needs_structured_citation_repair(task, state, tools, [])
+
+    def test_does_not_repair_without_resolver(self):
+        task = {"description": "Return the result with citations."}
+        state = _mock_state()
+
+        assert not _needs_structured_citation_repair(
+            task, state, [self._tool("execute_code")], [],
+        )
+
+    def test_does_not_repair_after_resolver_call(self):
+        task = {"description": "Cite the inspected locations."}
+        state = _mock_state()
+        tools = [self._tool("resolve_structured_citations")]
+        messages = [
+            ToolMessage(
+                content='{"citations": []}',
+                tool_call_id="citation-call",
+                name="resolve_structured_citations",
+            ),
+        ]
+
+        assert not _needs_structured_citation_repair(task, state, tools, messages)
+
+    @pytest.mark.asyncio
+    async def test_simple_agent_runs_exactly_one_repair_turn(self):
+        from app.modules.agents.deep.sub_agent import _execute_simple_sub_agent
+
+        task = {
+            "task_id": "citation-task",
+            "description": "Compute the exact total and cite the inspected locations.",
+            "domains": ["execution"],
+            "tools": ["execute_code"],
+        }
+        state = _mock_state(query="Return the total with citations.")
+        execution_tool = self._tool("execute_code")
+        citation_tool = self._tool("resolve_structured_citations")
+        first_messages = [
+            HumanMessage(content=task["description"]),
+            AIMessage(content="The total is 42."),
+        ]
+        repaired_messages = [
+            *first_messages,
+            ToolMessage(
+                content='{"citations": [{"citation_markdown": "[source](ref1)"}]}',
+                tool_call_id="citation-call",
+                name="resolve_structured_citations",
+            ),
+            AIMessage(content="The total is 42 [source](ref1)."),
+        ]
+        mock_agent = MagicMock()
+        mock_agent.ainvoke = AsyncMock(side_effect=[
+            {"messages": first_messages},
+            {"messages": repaired_messages},
+        ])
+
+        with patch(
+            "app.modules.agents.deep.sub_agent.get_tools_for_sub_agent",
+            return_value=[execution_tool, citation_tool],
+        ), patch(
+            "app.modules.agents.deep.sub_agent._wrap_tools_with_budget",
+            return_value=[execution_tool, citation_tool],
+        ), patch(
+            "app.modules.agents.deep.sub_agent.build_sub_agent_context",
+            return_value=[],
+        ), patch(
+            "app.modules.agents.deep.sub_agent._format_tools_for_prompt",
+            return_value="schemas",
+        ), patch(
+            "app.modules.agents.deep.sub_agent._build_sub_agent_tool_guidance",
+            return_value="guidance",
+        ), patch(
+            "app.modules.agents.deep.sub_agent._build_sub_agent_instructions",
+            return_value="",
+        ), patch(
+            "langchain.agents.create_agent",
+            return_value=mock_agent,
+        ), patch(
+            "app.modules.agents.deep.sub_agent.send_keepalive",
+            new_callable=AsyncMock,
+        ):
+            result = await _execute_simple_sub_agent(
+                task, state, [], _mock_config(), _mock_writer(), _mock_log(),
+            )
+
+        assert result["status"] == "success"
+        assert mock_agent.ainvoke.await_count == 2
+        repair_messages = mock_agent.ainvoke.await_args_list[1].args[0]["messages"]
+        assert repair_messages[:-1] == first_messages
+        assert "call that tool exactly once" in repair_messages[-1].content
+        assert result["result"]["tool_results"][0]["tool_name"] == "resolve_structured_citations"
 
 
 # ============================================================================

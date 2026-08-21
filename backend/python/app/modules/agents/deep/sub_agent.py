@@ -63,6 +63,49 @@ _WARM_LOG_THRESHOLD_MS = 50
 # Sentinel used to split prompt templates around the context placeholder
 _CONTEXT_SENTINEL = "<<<__CONTEXT_PLACEHOLDER__>>>"
 
+_STRUCTURED_CITATION_TOOL = "resolve_structured_citations"
+_CITATION_REQUEST_MARKERS = (
+    "cite",
+    "citation",
+    "source location",
+    "source locations",
+    "inspected location",
+    "inspected locations",
+)
+_CITATION_REPAIR_INSTRUCTION = (
+    "The request requires source citations, but you have not called "
+    "resolve_structured_citations. Before answering, call that tool exactly once "
+    "with the source-native locations you actually inspected. Use the returned "
+    "citation_markdown values exactly; do not invent citation IDs or locations."
+)
+
+
+def _needs_structured_citation_repair(
+    task: SubAgentTask,
+    state: DeepAgentState,
+    tools: list,
+    messages: list,
+) -> bool:
+    """Return whether a citation-required structured task needs one repair turn."""
+    available_tool_names = {
+        getattr(tool, "name", "") for tool in tools
+    }
+    if _STRUCTURED_CITATION_TOOL not in available_tool_names:
+        return False
+
+    request_text = " ".join((
+        str(state.get("query", "")),
+        str(task.get("description", "")),
+    )).lower()
+    if not any(marker in request_text for marker in _CITATION_REQUEST_MARKERS):
+        return False
+
+    return not any(
+        isinstance(message, ToolMessage)
+        and getattr(message, "name", "") == _STRUCTURED_CITATION_TOOL
+        for message in messages
+    )
+
 
 async def _resolve_sub_agent_attachments(state: dict) -> list[dict]:
     """Build attachment blocks for sub-agents using simple PDF extraction.
@@ -567,6 +610,23 @@ async def _execute_simple_sub_agent(
         )
         try:
             result = await agent.ainvoke({"messages": messages}, config=agent_config)
+            final_messages = result.get("messages", [])
+            if _needs_structured_citation_repair(
+                task, state, tools, final_messages,
+            ):
+                log.info(
+                    "Sub-agent %s: running one bounded structured-citation repair turn",
+                    task_id,
+                )
+                result = await agent.ainvoke(
+                    {
+                        "messages": [
+                            *final_messages,
+                            HumanMessage(content=_CITATION_REPAIR_INSTRUCTION),
+                        ],
+                    },
+                    config=agent_config,
+                )
         finally:
             keepalive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

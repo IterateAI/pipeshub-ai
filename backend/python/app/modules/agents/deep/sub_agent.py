@@ -72,12 +72,6 @@ _CITATION_REQUEST_MARKERS = (
     "inspected location",
     "inspected locations",
 )
-_CITATION_REPAIR_INSTRUCTION = (
-    "The request requires source citations, but you have not called "
-    "resolve_structured_citations. Before answering, call that tool exactly once "
-    "with the source-native locations you actually inspected. Use the returned "
-    "citation_markdown values exactly; do not invent citation IDs or locations."
-)
 
 
 def _needs_structured_citation_repair(
@@ -104,6 +98,30 @@ def _needs_structured_citation_repair(
         isinstance(message, ToolMessage)
         and getattr(message, "name", "") == _STRUCTURED_CITATION_TOOL
         for message in messages
+    )
+
+
+def _build_structured_citation_repair_instruction(state: DeepAgentState) -> str:
+    """Build a one-shot repair instruction with exact attachment Record IDs."""
+    record_lines = []
+    for attachment in state.get("attachments") or []:
+        record_id = str(attachment.get("recordId") or "").strip()
+        if not record_id:
+            continue
+        record_name = str(attachment.get("recordName") or "attachment").strip()
+        record_lines.append(f"- {record_name}: {record_id}")
+
+    record_context = (
+        "\nAvailable attachment Record IDs:\n" + "\n".join(record_lines)
+        if record_lines
+        else ""
+    )
+    return (
+        "The request requires source citations, but you have not called "
+        "resolve_structured_citations. Before answering, call that tool exactly once "
+        "with the exact Record ID below and the source-native locations you actually "
+        "inspected. Use the returned citation_markdown values exactly; do not invent "
+        f"citation IDs or locations.{record_context}"
     )
 
 
@@ -622,7 +640,11 @@ async def _execute_simple_sub_agent(
                     {
                         "messages": [
                             *final_messages,
-                            HumanMessage(content=_CITATION_REPAIR_INSTRUCTION),
+                            HumanMessage(
+                                content=_build_structured_citation_repair_instruction(
+                                    state,
+                                ),
+                            ),
                         ],
                     },
                     config=agent_config,

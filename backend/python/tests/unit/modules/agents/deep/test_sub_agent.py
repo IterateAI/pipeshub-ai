@@ -30,6 +30,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.modules.agents.deep.sub_agent import (
     _build_sub_agent_instructions,
     _build_sub_agent_tool_guidance,
+    _build_structured_citation_repair_instruction,
     _detect_status,
     _extract_response,
     _extract_tool_results,
@@ -45,6 +46,7 @@ from uuid import uuid4
 from app.modules.agents.deep.sub_agent import (
     _build_sub_agent_instructions,
     _build_sub_agent_tool_guidance,
+    _build_structured_citation_repair_instruction,
     _detect_status,
     _extract_response,
     _extract_tool_results,
@@ -138,6 +140,17 @@ class TestStructuredCitationRepair:
 
         assert not _needs_structured_citation_repair(task, state, tools, messages)
 
+    def test_repair_instruction_includes_exact_attachment_record_id(self):
+        state = _mock_state(attachments=[{
+            "recordId": "record-123",
+            "recordName": "source.csv",
+        }])
+
+        instruction = _build_structured_citation_repair_instruction(state)
+
+        assert "source.csv: record-123" in instruction
+        assert "do not invent" in instruction
+
     @pytest.mark.asyncio
     async def test_simple_agent_runs_exactly_one_repair_turn(self):
         from app.modules.agents.deep.sub_agent import _execute_simple_sub_agent
@@ -148,7 +161,13 @@ class TestStructuredCitationRepair:
             "domains": ["execution"],
             "tools": ["execute_code"],
         }
-        state = _mock_state(query="Return the total with citations.")
+        state = _mock_state(
+            query="Return the total with citations.",
+            attachments=[{
+                "recordId": "record-123",
+                "recordName": "source.csv",
+            }],
+        )
         execution_tool = self._tool("execute_code")
         citation_tool = self._tool("resolve_structured_citations")
         first_messages = [
@@ -204,6 +223,7 @@ class TestStructuredCitationRepair:
         repair_messages = mock_agent.ainvoke.await_args_list[1].args[0]["messages"]
         assert repair_messages[:-1] == first_messages
         assert "call that tool exactly once" in repair_messages[-1].content
+        assert "source.csv: record-123" in repair_messages[-1].content
         assert result["result"]["tool_results"][0]["tool_name"] == "resolve_structured_citations"
 
 

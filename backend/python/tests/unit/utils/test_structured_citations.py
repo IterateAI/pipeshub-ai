@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import MagicMock, patch
 
 from app.utils.structured_citations import (
@@ -59,6 +60,36 @@ def _pptx_record() -> dict:
             "block_groups": [],
         },
     }
+
+
+def _sqlite_record() -> dict:
+    return {
+        "id": "record-sqlite",
+        "record_name": "metrics.sqlite",
+        "frontend_url": "https://app.example.com",
+        "block_containers": {
+            "blocks": [
+                {
+                    "index": 0,
+                    "data": "SQLite object cells: CREATE TABLE cells (value TEXT)",
+                    "citation_metadata": {},
+                },
+            ],
+            "block_groups": [],
+        },
+    }
+
+
+def _sqlite_bytes(tmp_path) -> bytes:
+    database = tmp_path / "metrics.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE cells (label TEXT, value TEXT)")
+        connection.execute("INSERT INTO cells (label, value) VALUES (?, ?)", ("alpha", "891456"))
+        connection.commit()
+    finally:
+        connection.close()
+    return database.read_bytes()
 
 
 def test_resolves_csv_rows_to_real_refs() -> None:
@@ -123,6 +154,66 @@ def test_slide_location_returns_every_parsed_block_on_slide() -> None:
 def test_single_excel_cell_matches_parsed_row_range() -> None:
     assert _cell_reference_matches("C7", "A7:H7") is True
     assert _cell_reference_matches("C8", "A7:H7") is False
+
+
+def test_resolves_exact_sqlite_value_to_materialized_block(tmp_path) -> None:
+    mapper = MagicMock()
+    mapper.get_or_create_ref.return_value = "ref-sqlite"
+    record = _sqlite_record()
+
+    result = resolve_structured_citations(
+        record_id="record-sqlite",
+        locations=[
+            StructuredCitationLocation(
+                sqlite_table="cells",
+                sqlite_rowid=1,
+                sqlite_column="value",
+            )
+        ],
+        virtual_record_id_to_result={"vr-sqlite": record},
+        ref_mapper=mapper,
+        attachment_input_files={"metrics.sqlite": _sqlite_bytes(tmp_path)},
+    )
+
+    assert result["ok"] is True
+    assert result["citations"] == [
+        {
+            "citation_id": "ref-sqlite",
+            "citation_markdown": "[source](ref-sqlite)",
+            "location": "SQLite table cells, rowid 1, column value",
+            "block_index": 1,
+            "content_preview": "SQLite table cells, rowid 1, column value: 891456",
+        }
+    ]
+    assert record["block_containers"]["blocks"][1]["data"].endswith(": 891456")
+    mapper.get_or_create_ref.assert_called_once_with(
+        "https://app.example.com/record/record-sqlite/preview#blockIndex=1"
+    )
+
+
+def test_sqlite_resolution_rejects_unknown_column(tmp_path) -> None:
+    mapper = MagicMock()
+    record = _sqlite_record()
+
+    result = resolve_structured_citations(
+        record_id="record-sqlite",
+        locations=[
+            StructuredCitationLocation(
+                sqlite_table="cells",
+                sqlite_rowid=1,
+                sqlite_column="missing",
+            )
+        ],
+        virtual_record_id_to_result={"vr-sqlite": record},
+        ref_mapper=mapper,
+        attachment_input_files={"metrics.sqlite": _sqlite_bytes(tmp_path)},
+    )
+
+    assert result["ok"] is False
+    assert result["unresolved_locations"] == [
+        {"sqlite_table": "cells", "sqlite_rowid": 1, "sqlite_column": "missing"}
+    ]
+    mapper.get_or_create_ref.assert_not_called()
 
 
 async def test_tool_factory_uses_injected_mapper_and_records() -> None:

@@ -449,6 +449,7 @@ class TestGetToolsForSubAgent:
         create_citation_tool.assert_called_once_with(
             state["virtual_record_id_to_result"],
             state["citation_ref_mapper"],
+            None,
         )
 
     def test_no_cached_tools_fallback(self):

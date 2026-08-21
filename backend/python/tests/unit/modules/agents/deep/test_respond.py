@@ -2439,6 +2439,7 @@ class TestDeepRespondImplExtended:
         create_citation_tool.assert_called_once_with(
             state["virtual_record_id_to_result"],
             ref_mapper,
+            None,
         )
         assert citation_tool in streamed_tools
 

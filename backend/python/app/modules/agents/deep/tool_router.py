@@ -227,6 +227,7 @@ def get_tools_for_sub_agent(
             create_resolve_structured_citations_tool(
                 virtual_record_map,
                 ref_mapper,
+                state.get("attachment_input_files"),
             )
         )
 

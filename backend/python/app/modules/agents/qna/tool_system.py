@@ -900,6 +900,7 @@ def get_agent_tools_with_schemas(state: ChatState) -> list:
                     citation_tool = create_resolve_structured_citations_tool(
                         virtual_record_map,
                         ref_mapper,
+                        state.get("attachment_input_files"),
                     )
                     structured_tools.append(citation_tool)
                     if state_logger:

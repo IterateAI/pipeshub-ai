@@ -137,6 +137,9 @@ def structured_record_block_entries(
         cell_reference = None
         worksheet_row = None
         slide_number = None
+        sqlite_table = None
+        sqlite_rowid = None
+        sqlite_column = None
         if normalized_extension == "csv":
             csv_row = citation.get("row_number") or (
                 data.get("row_number") if isinstance(data, dict) else None
@@ -161,6 +164,16 @@ def structured_record_block_entries(
             slide_number = citation.get("slide_number") or citation.get("page_number")
             if slide_number is not None:
                 location_parts.append(f"slide {slide_number}")
+        elif normalized_extension in {"sqlite", "sqlite3", "db"}:
+            sqlite_table = citation.get("sqlite_table")
+            sqlite_rowid = citation.get("sqlite_rowid")
+            sqlite_column = citation.get("sqlite_column")
+            if sqlite_table:
+                location_parts.append(f"SQLite table {sqlite_table}")
+            if sqlite_rowid is not None:
+                location_parts.append(f"rowid {sqlite_rowid}")
+            if sqlite_column:
+                location_parts.append(f"column {sqlite_column}")
 
         if isinstance(data, dict):
             row_values = data.get("row_values")
@@ -191,6 +204,11 @@ def structured_record_block_entries(
                 "slide_number": (
                     int(slide_number) if slide_number is not None else None
                 ),
+                "sqlite_table": str(sqlite_table) if sqlite_table else None,
+                "sqlite_rowid": (
+                    int(sqlite_rowid) if sqlite_rowid is not None else None
+                ),
+                "sqlite_column": str(sqlite_column) if sqlite_column else None,
             }
         )
     return entries

@@ -7007,6 +7007,7 @@ async def respond_node(
                     create_resolve_structured_citations_tool(
                         virtual_record_map,
                         ref_mapper,
+                        state.get("attachment_input_files"),
                     )
                 )
                 log.debug(

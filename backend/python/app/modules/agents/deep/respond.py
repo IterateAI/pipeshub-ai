@@ -372,6 +372,21 @@ async def _deep_respond_impl(
             len(virtual_record_map),
             len(final_results),
         )
+        ref_mapper = state.get("citation_ref_mapper")
+        if ref_mapper is not None:
+            from app.utils.structured_citations import (
+                create_resolve_structured_citations_tool,
+            )
+
+            tools.append(
+                create_resolve_structured_citations_tool(
+                    virtual_record_map,
+                    ref_mapper,
+                )
+            )
+            log.debug(
+                "Added resolve_structured_citations tool for oversized attachments"
+            )
     
    
     

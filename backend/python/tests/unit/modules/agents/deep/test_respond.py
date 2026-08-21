@@ -2381,23 +2381,34 @@ class TestDeepRespondImplExtended:
         writer = _mock_writer()
         config = _mock_config()
         log = _mock_log()
+        ref_mapper = MagicMock()
+        citation_tool = MagicMock()
+        citation_tool.name = "resolve_structured_citations"
+        streamed_tools = []
 
         async def mock_stream(*args, **kwargs):
+            streamed_tools.extend(kwargs["tools"])
             yield {"event": "complete", "data": {"answer": "Based on R1...", "citations": [{"id": "vr1"}], "confidence": "High"}}
 
         with patch("app.modules.agents.deep.respond.safe_stream_write"), \
              patch("app.modules.agents.deep.respond._log_state_diagnostic"), \
              patch("app.modules.agents.qna.nodes.merge_and_number_retrieval_results", return_value=state["final_results"], create=True), \
-             patch("app.utils.chat_helpers.get_message_content", return_value=([{"type": "text", "text": "R1: content"}], MagicMock())), \
+             patch("app.utils.chat_helpers.get_message_content", return_value=([{"type": "text", "text": "R1: content"}], ref_mapper)), \
              patch("app.modules.qna.response_prompt.build_record_label_mapping", return_value={"R1": "vr1"}, create=True), \
              patch("app.modules.agents.deep.respond.build_respond_conversation_context", return_value=[]), \
              patch("app.modules.agents.qna.nodes._build_tool_results_context", return_value=""), \
              patch("app.utils.streaming.stream_llm_response_with_tools", side_effect=mock_stream), \
-             patch("app.utils.fetch_full_record.create_fetch_full_record_tool", return_value=MagicMock()):
+             patch("app.utils.fetch_full_record.create_fetch_full_record_tool", return_value=MagicMock()), \
+             patch("app.utils.structured_citations.create_resolve_structured_citations_tool", return_value=citation_tool) as create_citation_tool:
             result = await _deep_respond_impl(state, config, writer, 0.0, log)
 
         assert result["response"] == "Based on R1..."
         assert result["completion_data"]["confidence"] == "High"
+        create_citation_tool.assert_called_once_with(
+            state["virtual_record_id_to_result"],
+            ref_mapper,
+        )
+        assert citation_tool in streamed_tools
 
 
 # ============================================================================

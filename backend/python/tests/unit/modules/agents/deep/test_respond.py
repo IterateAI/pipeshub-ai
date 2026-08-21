@@ -2442,6 +2442,108 @@ class TestDeepRespondImplExtended:
         )
         assert citation_tool in streamed_tools
 
+    @pytest.mark.asyncio
+    async def test_retrieval_path_keeps_opt_in_execution_tools(self):
+        """Deep response synthesis can reuse sandbox tools after sub-agent work."""
+        from app.modules.agents.deep.respond import _deep_respond_impl
+
+        execution_tool = MagicMock()
+        execution_tool.name = "database_sandbox_execute_sqlite"
+        execution_tool._original_name = "database_sandbox.execute_sqlite"
+        citation_tool = MagicMock()
+        citation_tool.name = "resolve_structured_citations"
+        ref_mapper = MagicMock()
+        state = {
+            "logger": _mock_log(),
+            "llm": MagicMock(),
+            "error": None,
+            "response": None,
+            "completion_data": None,
+            "reflection_decision": "respond_success",
+            "reflection": {},
+            "task_plan": {},
+            "completed_tasks": [
+                {
+                    "task_id": "t1",
+                    "status": "success",
+                    "domains": ["database_sandbox"],
+                    "result": {"response": "SQLite query completed"},
+                },
+            ],
+            "sub_agent_analyses": ["The query returned the requested rows."],
+            "tool_results": [],
+            "all_tool_results": [
+                {
+                    "tool_name": "database_sandbox_execute_sqlite",
+                    "status": "success",
+                    "result": {"rows": [[1]]},
+                },
+            ],
+            "final_results": [
+                {
+                    "virtual_record_id": "vr1",
+                    "block_index": 0,
+                    "score": 0.9,
+                    "text": "database attachment",
+                },
+            ],
+            "virtual_record_id_to_result": {"vr1": {"title": "data.sqlite"}},
+            "query": "Query the database",
+            "instructions": "",
+            "system_prompt": "",
+            "previous_conversations": [],
+            "conversation_summary": None,
+            "qna_message_content": "R1: database attachment",
+            "user_info": {},
+            "org_info": {},
+            "graph_provider": None,
+            "blob_store": MagicMock(),
+            "config_service": None,
+            "org_id": "org1",
+            "user_id": "user1",
+            "is_multimodal_llm": False,
+            "conversation_id": "conv1",
+            "retrieval_service": None,
+            "decomposed_queries": [],
+            "record_label_to_uuid_map": {},
+        }
+        streamed_tools = []
+
+        async def mock_stream(*args, **kwargs):
+            streamed_tools.extend(kwargs["tools"])
+            yield {
+                "event": "complete",
+                "data": {
+                    "answer": "The database result is 1.",
+                    "citations": [{"id": "vr1"}],
+                    "confidence": "High",
+                },
+            }
+
+        with patch.dict("os.environ", {"RESPOND_NODE_EXECUTION_TOOLS_ENABLED": "true"}), \
+             patch("app.modules.agents.deep.respond.safe_stream_write"), \
+             patch("app.modules.agents.deep.respond._log_state_diagnostic"), \
+             patch("app.modules.agents.qna.nodes.merge_and_number_retrieval_results", return_value=state["final_results"], create=True), \
+             patch("app.utils.chat_helpers.get_message_content", return_value=([{"type": "text", "text": "R1: content"}], ref_mapper)), \
+             patch("app.modules.qna.response_prompt.build_record_label_mapping", return_value={"R1": "vr1"}, create=True), \
+             patch("app.modules.agents.deep.respond.build_respond_conversation_context", return_value=[]), \
+             patch("app.modules.agents.qna.nodes._build_tool_results_context", return_value=""), \
+             patch("app.modules.agents.qna.tool_system.get_agent_tools_with_schemas", return_value=[execution_tool]), \
+             patch("app.utils.streaming.stream_llm_response_with_tools", side_effect=mock_stream), \
+             patch("app.utils.fetch_full_record.create_fetch_full_record_tool", return_value=MagicMock()), \
+             patch("app.utils.structured_citations.create_resolve_structured_citations_tool", return_value=citation_tool):
+            result = await _deep_respond_impl(
+                state,
+                _mock_config(),
+                _mock_writer(),
+                0.0,
+                _mock_log(),
+            )
+
+        assert result["response"] == "The database result is 1."
+        assert execution_tool in streamed_tools
+        assert citation_tool in streamed_tools
+
 
 # ============================================================================
 # 32. Coverage extensions for missing lines

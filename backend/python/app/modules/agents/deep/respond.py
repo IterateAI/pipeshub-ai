@@ -355,7 +355,9 @@ async def _deep_respond_impl(
     # ================================================================
     # Setup tools (fetch_full_record for retrieval)
     # ================================================================
-    tools: list = []
+    from app.modules.agents.qna.nodes import _get_response_execution_tools
+
+    tools: list = _get_response_execution_tools(state, log)
     if virtual_record_map:
         from app.utils.fetch_full_record import (
             create_fetch_full_record_tool,
@@ -366,7 +368,7 @@ async def _deep_respond_impl(
             graph_provider=state.get("graph_provider"),
             user_id=state.get("user_id", ""),
         )
-        tools = [fetch_tool]
+        tools.append(fetch_tool)
         log.debug(
             "Added agent fetch_full_record tool (%d records, %d labels)",
             len(virtual_record_map),

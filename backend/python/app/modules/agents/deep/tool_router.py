@@ -213,6 +213,23 @@ def get_tools_for_sub_agent(
         elif sanitized_name.replace("_", ".") in assigned_set:
             filtered.append(tool)
 
+    virtual_record_map = state.get("virtual_record_id_to_result") or {}
+    ref_mapper = state.get("citation_ref_mapper")
+    if virtual_record_map and ref_mapper is not None and not any(
+        getattr(tool, "name", "") == "resolve_structured_citations"
+        for tool in filtered
+    ):
+        from app.utils.structured_citations import (
+            create_resolve_structured_citations_tool,
+        )
+
+        filtered.append(
+            create_resolve_structured_citations_tool(
+                virtual_record_map,
+                ref_mapper,
+            )
+        )
+
     return filtered
 
 

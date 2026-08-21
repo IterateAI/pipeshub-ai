@@ -908,7 +908,16 @@ def _collect_tool_results(state: DeepAgentState, log: logging.Logger) -> list[di
         log.info("Domains covered by analyses (skipping raw results): %s",
                  ", ".join(sorted(covered_domains)))
 
-    # If ALL domains are covered, skip raw results entirely
+    all_results = state.get("tool_results") or state.get("all_tool_results") or []
+    citation_results = [
+        result
+        for result in all_results
+        if result.get("status") == "success"
+        and result.get("tool_name", "").replace(".", "_")
+        == "resolve_structured_citations"
+    ]
+
+    # If ALL domains are covered, preserve only non-redundant citation evidence.
     all_domains = set()
     for t in completed:
         if t.get("status") == "success":
@@ -916,11 +925,13 @@ def _collect_tool_results(state: DeepAgentState, log: logging.Logger) -> list[di
                 all_domains.add(d.lower())
 
     if all_domains and all_domains <= covered_domains:
-        log.info("All %d domains covered by analyses — skipping all raw tool results",
-                 len(all_domains))
-        return []
+        log.info(
+            "All %d domains covered by analyses — preserving %d citation result(s)",
+            len(all_domains),
+            len(citation_results),
+        )
+        return citation_results
 
-    all_results = state.get("tool_results") or state.get("all_tool_results") or []
     if not all_results:
         return []
 
@@ -929,6 +940,9 @@ def _collect_tool_results(state: DeepAgentState, log: logging.Logger) -> list[di
         if r.get("status") != "success":
             continue
         tool_name = r.get("tool_name", "")
+        if tool_name.replace(".", "_") == "resolve_structured_citations":
+            useful.append(r)
+            continue
         # Skip retrieval results (they don't have API data with links)
         if "retrieval" in tool_name.lower() or "knowledge" in tool_name.lower():
             continue

@@ -424,6 +424,33 @@ class TestGetToolsForSubAgent:
         result = get_tools_for_sub_agent([], state)
         assert result == []
 
+    def test_structured_citation_resolver_is_available_for_attachments(self):
+        execution_tool = MagicMock()
+        execution_tool.name = "coding_sandbox_execute_python"
+        execution_tool._original_name = "coding_sandbox.execute_python"
+        citation_tool = MagicMock()
+        citation_tool.name = "resolve_structured_citations"
+        state = {
+            "cached_structured_tools": [execution_tool],
+            "virtual_record_id_to_result": {"vr1": {"id": "record-1"}},
+            "citation_ref_mapper": MagicMock(),
+        }
+
+        with patch(
+            "app.utils.structured_citations.create_resolve_structured_citations_tool",
+            return_value=citation_tool,
+        ) as create_citation_tool:
+            result = get_tools_for_sub_agent(
+                ["coding_sandbox.execute_python"],
+                state,
+            )
+
+        assert result == [execution_tool, citation_tool]
+        create_citation_tool.assert_called_once_with(
+            state["virtual_record_id_to_result"],
+            state["citation_ref_mapper"],
+        )
+
     def test_no_cached_tools_fallback(self):
         # When cache is None, it tries to load fresh via get_agent_tools_with_schemas
         with patch("app.modules.agents.qna.tool_system.get_agent_tools_with_schemas",

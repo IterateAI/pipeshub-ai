@@ -263,6 +263,38 @@ class TestCollectToolResults:
         result = _collect_tool_results(state, log)
         assert result == []
 
+    def test_preserves_structured_citations_when_analysis_covers_domain(self):
+        log = _mock_log()
+        citation_result = {
+            "tool_name": "resolve_structured_citations",
+            "status": "success",
+            "result": {
+                "citations": [
+                    {"citation_markdown": "[source](ref1)"},
+                ],
+            },
+        }
+        state = {
+            "completed_tasks": [
+                {
+                    "task_id": "t1",
+                    "status": "success",
+                    "domains": ["coding_sandbox"],
+                    "result": {"response": "x" * 600},
+                },
+            ],
+            "tool_results": [
+                {
+                    "tool_name": "coding_sandbox_execute_python",
+                    "status": "success",
+                    "result": {"stdout": "421938"},
+                },
+                citation_result,
+            ],
+        }
+
+        assert _collect_tool_results(state, log) == [citation_result]
+
     def test_covered_domains_skipped(self):
         """When analyses already cover the domain, raw results are skipped."""
         log = _mock_log()

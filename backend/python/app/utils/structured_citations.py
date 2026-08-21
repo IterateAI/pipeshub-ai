@@ -54,6 +54,14 @@ class StructuredCitationLocation(BaseModel):
         default=None,
         description="Exact SQLite column containing the cited value.",
     )
+    sqlite_filters: dict[str, str | int | float | bool | None] | None = Field(
+        default=None,
+        description=(
+            "Exact SQLite equality filters used to identify one inspected row, "
+            "for example {'sheet_name': 'LA', 'cell_coordinate': 'D97'}. "
+            "Use this instead of guessing sqlite_rowid."
+        ),
+    )
 
 
 class ResolveStructuredCitationsArgs(BaseModel):
@@ -152,6 +160,10 @@ def _location_matches(
         supplied = True
         if (entry.get("sqlite_column") or "").casefold() != requested.sqlite_column.casefold():
             return False
+    if requested.sqlite_filters:
+        supplied = True
+        if (entry.get("sqlite_filters") or {}) != requested.sqlite_filters:
+            return False
     return supplied
 
 
@@ -204,7 +216,7 @@ def _add_sqlite_value_blocks(
         location
         for location in locations
         if location.sqlite_table
-        and location.sqlite_rowid is not None
+        and (location.sqlite_rowid is not None or location.sqlite_filters)
         and location.sqlite_column
     ]
     if not requested:
@@ -217,6 +229,11 @@ def _add_sqlite_value_blocks(
             str((block.get("citation_metadata") or {}).get("sqlite_table") or "").casefold(),
             (block.get("citation_metadata") or {}).get("sqlite_rowid"),
             str((block.get("citation_metadata") or {}).get("sqlite_column") or "").casefold(),
+            tuple(
+                sorted(
+                    ((block.get("citation_metadata") or {}).get("sqlite_filters") or {}).items()
+                )
+            ),
         )
         for block in blocks
         if isinstance(block, dict)
@@ -233,9 +250,6 @@ def _add_sqlite_value_blocks(
             for location in requested:
                 table = str(location.sqlite_table)
                 column = str(location.sqlite_column)
-                key = (table.casefold(), location.sqlite_rowid, column.casefold())
-                if key in existing:
-                    continue
                 if not _SQLITE_IDENTIFIER_RE.fullmatch(table) or not _SQLITE_IDENTIFIER_RE.fullmatch(column):
                     continue
                 columns = {
@@ -244,13 +258,45 @@ def _add_sqlite_value_blocks(
                 }
                 if column.casefold() not in columns:
                     continue
-                row = connection.execute(
-                    f'SELECT "{column}" FROM "{table}" WHERE rowid = ?',
-                    (location.sqlite_rowid,),
-                ).fetchone()
-                if row is None:
+
+                filters = location.sqlite_filters or {}
+                if filters:
+                    if any(
+                        not _SQLITE_IDENTIFIER_RE.fullmatch(filter_column)
+                        or filter_column.casefold() not in columns
+                        for filter_column in filters
+                    ):
+                        continue
+                    predicates: list[str] = []
+                    parameters: list[Any] = []
+                    for filter_column, filter_value in filters.items():
+                        if filter_value is None:
+                            predicates.append(f'"{filter_column}" IS NULL')
+                        else:
+                            predicates.append(f'"{filter_column}" = ?')
+                            parameters.append(filter_value)
+                    rows = connection.execute(
+                        f'SELECT rowid, "{column}" FROM "{table}" '
+                        f'WHERE {" AND ".join(predicates)} LIMIT 2',
+                        parameters,
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        f'SELECT rowid, "{column}" FROM "{table}" WHERE rowid = ?',
+                        (location.sqlite_rowid,),
+                    ).fetchall()
+                if len(rows) != 1:
                     continue
-                value = row[0]
+                actual_rowid, value = rows[0]
+                location.sqlite_rowid = int(actual_rowid)
+                key = (
+                    table.casefold(),
+                    location.sqlite_rowid,
+                    column.casefold(),
+                    tuple(sorted(filters.items())),
+                )
+                if key in existing:
+                    continue
                 blocks.append(
                     {
                         "index": next_index,
@@ -265,6 +311,7 @@ def _add_sqlite_value_blocks(
                             "sqlite_table": table,
                             "sqlite_rowid": location.sqlite_rowid,
                             "sqlite_column": column,
+                            "sqlite_filters": filters,
                         },
                     }
                 )
@@ -291,15 +338,15 @@ def resolve_structured_citations(
     record = next(
         (
             candidate
-            for candidate in virtual_record_id_to_result.values()
+            for virtual_record_id, candidate in virtual_record_id_to_result.items()
             if isinstance(candidate, dict)
-            and str(
-                candidate.get("id")
-                or candidate.get("record_id")
-                or candidate.get("_key")
-                or ""
-            )
-            == record_id
+            and record_id
+            in {
+                str(virtual_record_id),
+                str(candidate.get("id") or ""),
+                str(candidate.get("record_id") or ""),
+                str(candidate.get("_key") or ""),
+            }
         ),
         None,
     )
@@ -381,8 +428,9 @@ def create_resolve_structured_citations_tool(
         Use this after inspecting an oversized structured attachment in the coding
         sandbox. Never guess citation IDs. Pass the exact Record ID from the
         attachment context and only source locations that support the final answer.
-        For SQLite, pass sqlite_table, sqlite_rowid, and sqlite_column exactly as
-        inspected in the sandbox.
+        For SQLite, pass sqlite_table and sqlite_column plus either the exact
+        sqlite_rowid or exact sqlite_filters from the inspected query. Never guess
+        rowids.
         """
         return resolve_structured_citations(
             record_id=record_id,

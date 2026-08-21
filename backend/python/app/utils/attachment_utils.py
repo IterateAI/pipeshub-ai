@@ -140,6 +140,7 @@ def structured_record_block_entries(
         sqlite_table = None
         sqlite_rowid = None
         sqlite_column = None
+        sqlite_filters = None
         if normalized_extension == "csv":
             csv_row = citation.get("row_number") or (
                 data.get("row_number") if isinstance(data, dict) else None
@@ -168,6 +169,7 @@ def structured_record_block_entries(
             sqlite_table = citation.get("sqlite_table")
             sqlite_rowid = citation.get("sqlite_rowid")
             sqlite_column = citation.get("sqlite_column")
+            sqlite_filters = citation.get("sqlite_filters")
             if sqlite_table:
                 location_parts.append(f"SQLite table {sqlite_table}")
             if sqlite_rowid is not None:
@@ -209,6 +211,7 @@ def structured_record_block_entries(
                     int(sqlite_rowid) if sqlite_rowid is not None else None
                 ),
                 "sqlite_column": str(sqlite_column) if sqlite_column else None,
+                "sqlite_filters": sqlite_filters,
             }
         )
     return entries

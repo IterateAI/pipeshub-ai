@@ -84,8 +84,13 @@ def _sqlite_bytes(tmp_path) -> bytes:
     database = tmp_path / "metrics.sqlite"
     connection = sqlite3.connect(database)
     try:
-        connection.execute("CREATE TABLE cells (label TEXT, value TEXT)")
-        connection.execute("INSERT INTO cells (label, value) VALUES (?, ?)", ("alpha", "891456"))
+        connection.execute(
+            "CREATE TABLE cells (label TEXT, row_index INTEGER, value TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO cells (label, row_index, value) VALUES (?, ?, ?)",
+            ("alpha", 53, "891456"),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -191,6 +196,32 @@ def test_resolves_exact_sqlite_value_to_materialized_block(tmp_path) -> None:
     )
 
 
+def test_resolves_sqlite_value_by_exact_filters_and_virtual_record_id(tmp_path) -> None:
+    mapper = MagicMock()
+    mapper.get_or_create_ref.return_value = "ref-filtered"
+    record = _sqlite_record()
+
+    result = resolve_structured_citations(
+        record_id="vr-sqlite",
+        locations=[
+            StructuredCitationLocation(
+                sqlite_table="cells",
+                sqlite_column="value",
+                sqlite_filters={"label": "alpha", "row_index": 53},
+            )
+        ],
+        virtual_record_id_to_result={"vr-sqlite": record},
+        ref_mapper=mapper,
+        attachment_input_files={"metrics.sqlite": _sqlite_bytes(tmp_path)},
+    )
+
+    assert result["ok"] is True
+    assert result["citations"][0]["content_preview"].endswith(": 891456")
+    metadata = record["block_containers"]["blocks"][1]["citation_metadata"]
+    assert metadata["sqlite_rowid"] == 1
+    assert metadata["sqlite_filters"] == {"label": "alpha", "row_index": 53}
+
+
 def test_sqlite_resolution_rejects_unknown_column(tmp_path) -> None:
     mapper = MagicMock()
     record = _sqlite_record()
@@ -213,6 +244,27 @@ def test_sqlite_resolution_rejects_unknown_column(tmp_path) -> None:
     assert result["unresolved_locations"] == [
         {"sqlite_table": "cells", "sqlite_rowid": 1, "sqlite_column": "missing"}
     ]
+    mapper.get_or_create_ref.assert_not_called()
+
+
+def test_sqlite_resolution_rejects_unknown_filter_column(tmp_path) -> None:
+    mapper = MagicMock()
+
+    result = resolve_structured_citations(
+        record_id="vr-sqlite",
+        locations=[
+            StructuredCitationLocation(
+                sqlite_table="cells",
+                sqlite_column="value",
+                sqlite_filters={"missing": "alpha"},
+            )
+        ],
+        virtual_record_id_to_result={"vr-sqlite": _sqlite_record()},
+        ref_mapper=mapper,
+        attachment_input_files={"metrics.sqlite": _sqlite_bytes(tmp_path)},
+    )
+
+    assert result["ok"] is False
     mapper.get_or_create_ref.assert_not_called()
 
 

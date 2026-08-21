@@ -94,18 +94,29 @@ def _needs_structured_citation_repair(
     if not any(marker in request_text for marker in _CITATION_REQUEST_MARKERS):
         return False
 
-    return not any(
-        isinstance(message, ToolMessage)
-        and getattr(message, "name", "") == _STRUCTURED_CITATION_TOOL
-        for message in messages
-    )
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if getattr(message, "name", "") != _STRUCTURED_CITATION_TOOL:
+            continue
+        try:
+            payload = json.loads(str(message.content))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("ok") is True:
+            return False
+    return True
 
 
 def _build_structured_citation_repair_instruction(state: DeepAgentState) -> str:
     """Build a one-shot repair instruction with exact attachment Record IDs."""
     record_lines = []
     for attachment in state.get("attachments") or []:
-        record_id = str(attachment.get("recordId") or "").strip()
+        record_id = str(
+            attachment.get("virtualRecordId")
+            or attachment.get("recordId")
+            or ""
+        ).strip()
         if not record_id:
             continue
         record_name = str(attachment.get("recordName") or "attachment").strip()
@@ -121,7 +132,9 @@ def _build_structured_citation_repair_instruction(state: DeepAgentState) -> str:
         "resolve_structured_citations. Before answering, call that tool exactly once "
         "with the exact Record ID below and the source-native locations you actually "
         "inspected. Use the returned citation_markdown values exactly; do not invent "
-        f"citation IDs or locations.{record_context}"
+        "citation IDs or locations. For SQLite, never guess rowids: use sqlite_filters "
+        "with the exact equality predicates from the successful query unless rowid was "
+        f"explicitly selected and inspected.{record_context}"
     )
 
 

@@ -132,7 +132,7 @@ class TestStructuredCitationRepair:
         tools = [self._tool("resolve_structured_citations")]
         messages = [
             ToolMessage(
-                content='{"citations": []}',
+                content='{"ok": true, "citations": []}',
                 tool_call_id="citation-call",
                 name="resolve_structured_citations",
             ),
@@ -140,16 +140,32 @@ class TestStructuredCitationRepair:
 
         assert not _needs_structured_citation_repair(task, state, tools, messages)
 
+    def test_repairs_after_failed_resolver_call(self):
+        task = {"description": "Cite the inspected locations."}
+        state = _mock_state()
+        tools = [self._tool("resolve_structured_citations")]
+        messages = [
+            ToolMessage(
+                content='{"ok": false, "error": "unknown record"}',
+                tool_call_id="citation-call",
+                name="resolve_structured_citations",
+            ),
+        ]
+
+        assert _needs_structured_citation_repair(task, state, tools, messages)
+
     def test_repair_instruction_includes_exact_attachment_record_id(self):
         state = _mock_state(attachments=[{
             "recordId": "record-123",
+            "virtualRecordId": "virtual-record-456",
             "recordName": "source.csv",
         }])
 
         instruction = _build_structured_citation_repair_instruction(state)
 
-        assert "source.csv: record-123" in instruction
+        assert "source.csv: virtual-record-456" in instruction
         assert "do not invent" in instruction
+        assert "sqlite_filters" in instruction
 
     @pytest.mark.asyncio
     async def test_simple_agent_runs_exactly_one_repair_turn(self):
